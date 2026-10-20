@@ -100,13 +100,6 @@ jiransync/
   api.py, server.py          FastAPI HTTP API + WebSocket snapshots at 4 Hz
 ```
 
-**Kept from TwinSync.** The 3D map core: the deck.gl scene, building extrusion on real
-terrain, the facade shader, road rendering, the inspector card, camera control, the
-GeoJSON/DEM pipeline, the local coordinate frame and the street-graph router. All
-telecom logic was removed: towers, coverage and line of sight, dispatch, edge anomaly
-models, risk and root cause. The final TwinSync state is kept on the `twinsync-final`
-branch.
-
 **Who decides what.** The language model only *proposes* a structured task, and its
 output is clamped to the platform's own vocabulary. Who gets pinged (`matching.py`), the
 price range (`valuation.py`) and every credit movement (`credits.py`) are deterministic
