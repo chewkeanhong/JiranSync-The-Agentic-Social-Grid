@@ -1,0 +1,14 @@
+# docker compose up   →   http://localhost:8000
+#
+# One service, no database server. ANTHROPIC_API_KEY is passed through if set, so the
+# agentic task engine uses Claude; leave it unset to run on the rule-based fallback.
+services:
+  jiransync:
+    build: .
+    image: jiransync:0.2
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY
+      - JIRANSYNC_MODEL
+    restart: unless-stopped

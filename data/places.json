@@ -1,0 +1,63 @@
+{
+  "name": "City of Elmina",
+  "developer": "Sime Darby Property",
+  "note": "Hand-authored. Transit hubs are real stations outside the map; each tenant is pinned at load to the nearest OSM shop-lot to its anchor, so the demo never names a real business as a participant.",
+  "hubs": [
+    {
+      "id": "kwasa",
+      "name": "MRT Kwasa Damansara",
+      "aliases": ["kwasa", "kwasa damansara", "mrt"],
+      "lon": 101.5723905,
+      "lat": 3.177557
+    },
+    {
+      "id": "sgbuloh",
+      "name": "MRT/KTM Sungai Buloh",
+      "aliases": ["sungai buloh", "sg buloh", "ktm", "lrt"],
+      "lon": 101.5806978,
+      "lat": 3.206751
+    }
+  ],
+  "tenants": [
+    {
+      "id": "kopi",
+      "name": "Kopi Jiran Cafe",
+      "category": "cafe",
+      "anchor": [101.5101, 3.1814],
+      "skills": ["cooking"],
+      "offer": "RM2 off any drink per credit",
+      "lead_discount": 0.1,
+      "monthly_rent_rm": 6500
+    },
+    {
+      "id": "paip",
+      "name": "Elmina Plumbing & Electrical",
+      "category": "home services",
+      "anchor": [101.5135, 3.1790],
+      "skills": ["plumbing", "electrical", "repairs"],
+      "offer": "Credits accepted on call-out fees",
+      "lead_discount": 0.15,
+      "monthly_rent_rm": 4800
+    },
+    {
+      "id": "tuisyen",
+      "name": "Cerdik Tuition Centre",
+      "category": "education",
+      "anchor": [101.5085, 3.1830],
+      "skills": ["tutoring"],
+      "offer": "Credits toward a trial class",
+      "lead_discount": 0.2,
+      "monthly_rent_rm": 5200
+    },
+    {
+      "id": "hardware",
+      "name": "Taman Hardware",
+      "category": "hardware",
+      "anchor": [101.5150, 3.1805],
+      "skills": ["carpentry", "repairs", "gardening"],
+      "offer": "RM2 off per credit on tools and parts",
+      "lead_discount": 0.1,
+      "monthly_rent_rm": 5600
+    }
+  ]
+}

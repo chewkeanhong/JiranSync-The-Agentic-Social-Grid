@@ -1,0 +1,24 @@
+# Build-time dependencies: fetching data, training models, running the suite.
+#
+#     pip install -r requirements.txt -r requirements-dev.txt
+#
+# None of these are needed to run the app. They are needed to regenerate what is
+# already committed: the township GeoJSON, imputed heights and the DEM grid.
+
+-r requirements.txt
+
+# -- data pipeline
+scipy>=1.11             # cKDTree, used by scripts/impute_heights.py
+scikit-learn>=1.4       # RandomForest height imputer, scripts/impute_heights.py
+requests>=2.31          # Overpass fetch in scripts/fetch_osm.py
+
+# -- DEM ingest (scripts/fetch_dem.py)
+#
+# rasterio pulls GDAL and is the one genuinely awkward install here. It is only
+# needed to re-fetch the Copernicus tile; data/terrain.json is committed, and
+# `python scripts/fetch_dem.py --synthetic` needs nothing but numpy.
+rasterio>=1.3
+
+# -- tests
+pytest>=8.0
+httpx>=0.27             # FastAPI TestClient

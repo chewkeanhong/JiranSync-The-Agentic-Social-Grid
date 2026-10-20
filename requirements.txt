@@ -1,0 +1,22 @@
+# Runtime dependencies -- what the app needs and nothing more.
+#
+#     pip install -r requirements.txt
+#     python -m uvicorn jiransync.server:app --port 8000
+#
+# Everything needed to *build* the map data lives in requirements-dev.txt. The township
+# geometry and terrain are committed, so this file is enough to run with no network.
+
+# -- web tier
+fastapi>=0.115
+uvicorn>=0.30
+websockets>=12.0
+
+# -- map core
+numpy>=1.26
+networkx>=3.2
+
+# -- agentic task engine
+#
+# Optional at run time: without ANTHROPIC_API_KEY (or without this package) the
+# rule-based engine in jiransync/agent.py answers instead.
+anthropic>=1.0

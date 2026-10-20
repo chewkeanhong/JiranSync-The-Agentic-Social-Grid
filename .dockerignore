@@ -1,0 +1,11 @@
+.git
+.github
+.playwright-mcp
+tests
+scripts
+**/__pycache__
+.pytest_cache
+*.md
+!README.md
+data/jiransync.db
+data/train_buildings.geojson

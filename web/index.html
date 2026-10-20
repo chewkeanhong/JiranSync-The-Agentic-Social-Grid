@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JiranSync — Neighbours helping neighbours</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2310b981'/%3E%3Cpath d='M7 16 16 8.5 25 16v8.5H7z' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div id="map"></div>
+<!-- People, requests and places, pinned to the 3D map (components/markers.js) -->
+<div id="markers" class="markers"></div>
+
+<header class="topbar">
+  <div class="logo">
+    <span class="logo-mark" aria-hidden="true">
+      <svg viewBox="0 0 40 40"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#0ea5e9"/></linearGradient></defs>
+        <rect width="40" height="40" rx="12" fill="url(#lg)"/>
+        <path d="M9 20.5 20 11.5l11 9V30H9z" fill="#fff"/>
+        <circle cx="16" cy="23" r="2.4" fill="#10b981"/><circle cx="24" cy="23" r="2.4" fill="#0ea5e9"/>
+        <path d="M12.5 30c.6-2.6 1.8-3.9 3.5-3.9s2.9 1.3 3.5 3.9M20.5 30c.6-2.6 1.8-3.9 3.5-3.9s2.9 1.3 3.5 3.9" fill="#a7f3d0"/></svg>
+    </span>
+    <span class="logo-text"><b>JiranSync</b><em>City of Elmina · Community Digital Twin</em></span>
+  </div>
+
+  <div class="clock-wrap">
+    <button class="clock-pill" id="clock-pill" title="Township clock. Click to change it for a demo.">
+      <span id="clock-ic"></span><b id="clock-time">--:--</b><span id="clock-day" class="dim"></span>
+      <span id="clock-slot" class="slot-tag"></span>
+    </button>
+    <div id="clock-dd" class="dropdown clock-dd" hidden></div>
+  </div>
+
+  <div class="search">
+    <span id="search-ic"></span>
+    <input id="search" type="search" placeholder="Search for a task, place, or neighbour…" autocomplete="off" aria-label="Search">
+    <div id="search-results" class="dropdown search-dd" hidden></div>
+  </div>
+
+  <button class="place-pill" id="place-pill" title="Show the whole township">
+    <span id="place-ic"></span><span id="place-name">City of Elmina</span><span id="place-chev" class="dim"></span>
+  </button>
+
+  <span class="grow"></span>
+
+  <div class="devbar dev-only" id="devbar"><span class="conn" id="conn">connecting…</span><span id="devbar-info"></span></div>
+
+  <button class="icon-btn bell" id="bell" title="Notifications" aria-label="Notifications"></button>
+  <div id="notifs" class="dropdown notifs" hidden></div>
+
+  <button class="me-btn" id="me-btn" title="Your account">
+    <span id="me-avatar"></span>
+    <span class="me-text"><b id="me-name">Loading…</b><em id="me-credits" class="credits-num">— Credits</em></span>
+  </button>
+  <div id="me-menu" class="dropdown me-menu" hidden></div>
+</header>
+
+<nav class="rail" id="rail" aria-label="Sections"></nav>
+
+<div class="cats" id="cats" role="toolbar" aria-label="Show on map"></div>
+
+<aside class="panel panel-left" id="left">
+  <section id="ask-wrap">
+    <div id="ask" class="ask"></div>
+    <div id="draft" class="draft" hidden></div>
+  </section>
+  <div id="left-body" class="left-body"></div>
+</aside>
+
+<button class="right-toggle" id="right-toggle" title="Your credits and rewards">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M14.6 9.2c-.4-.9-1.4-1.5-2.6-1.5-1.5 0-2.6.8-2.6 1.9 0 2.6 5.3 1.4 5.3 4.4 0 1.2-1.2 2.1-2.7 2.1-1.3 0-2.3-.6-2.7-1.6"/></svg>
+</button>
+
+<aside class="panel panel-right" id="right">
+  <button class="icon-btn sm right-close" id="right-close" title="Close"></button>
+  <div id="wallet"></div>
+  <div class="sec-head"><h3>Rewards near you</h3></div>
+  <div id="rewards" class="rewards"></div>
+  <div class="sec-head"><h3>Your recent activity</h3></div>
+  <div id="my-activity" class="ledger"></div>
+</aside>
+
+<div class="map-tools" role="toolbar" aria-label="Map">
+  <div class="seg-v">
+    <button id="btn-view-2d" title="Flat plan">2D</button>
+    <button id="btn-view-3d" class="on" title="3D township">3D</button>
+  </div>
+  <button class="icon-btn" id="btn-locate" title="Find me"></button>
+  <button class="icon-btn" id="btn-view-reset" title="Whole township (V)"></button>
+  <button class="icon-btn" id="btn-layers" title="Map layers"></button>
+  <div id="layers-dd" class="dropdown layers-dd" hidden></div>
+  <div class="seg-v">
+    <button id="btn-zoom-in" title="Zoom in"></button>
+    <button id="btn-zoom-out" title="Zoom out"></button>
+  </div>
+</div>
+
+<footer class="legend" id="legend"></footer>
+
+<div class="attrib" id="attrib">
+  <b>City of Elmina</b> · Shah Alam, Selangor
+  <span>Map data © OpenStreetMap contributors · Terrain © Copernicus DEM</span>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<!-- The floating card: anchored to the selected neighbour, request or place by a hairline
+     leader, positioned by app.js after every frame. -->
+<svg class="insp-leader" id="insp-leader" style="display:none" aria-hidden="true">
+  <line x1="0" y1="0" x2="0" y2="0"></line>
+  <circle class="ring" r="9"></circle>
+  <circle class="dot" r="3"></circle>
+</svg>
+<aside class="insp" id="inspector" hidden aria-live="polite"></aside>
+
+<script src="/vendor/deck.gl.min.js"></script>
+<script src="/facade.js"></script>
+<script src="/components/icons.js"></script>
+<script src="/components/avatar.js"></script>
+<script src="/components/markers.js"></script>
+<script src="/components/cards.js"></script>
+<script src="/components/panels.js"></script>
+<script src="/app.js"></script>
+<script src="/architecture.js"></script>
+<script src="/township.js"></script>
+<script src="/jiran.js"></script>
+<script src="/stations.js"></script>
+<script src="/components/spatial.js"></script>
+</body>
+</html>
