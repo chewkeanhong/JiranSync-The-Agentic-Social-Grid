@@ -64,18 +64,22 @@ class Engine:
                                auto_accept=os.environ.get("JIRANSYNC_AUTO_ACCEPT", "1") != "0")
         # Reseed when the database is empty or was built against a different township:
         # residents must live in buildings that exist on this map.
-        signature = f"{self.places.get('name')}|{len(self.township.buildings)}"
+        signature = self._signature()
         if not self.grid.store.residents() or self.grid.store.get_meta("township") != signature:
             seeding.seed(self.grid)
             self.grid.store.set_meta("township", signature)
         seeding.backfill_profiles(self.grid.store)
         self.grid.resume_auto_accept()
 
+    def _signature(self) -> str:
+        """What the database was seeded for: this township, and this shape of community."""
+        return (f"{self.places.get('name')}|{len(self.township.buildings)}"
+                f"|seed{seeding.SEED_VERSION}")
+
     async def reseed(self) -> None:
         async with self._lock:
             seeding.seed(self.grid)
-            self.grid.store.set_meta(
-                "township", f"{self.places.get('name')}|{len(self.township.buildings)}")
+            self.grid.store.set_meta("township", self._signature())
         await self.push()
 
     def static_payload(self) -> dict:

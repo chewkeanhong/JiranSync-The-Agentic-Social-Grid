@@ -45,6 +45,7 @@ const hooks = {
   tintKey: () => '',  // signature for buildingTint, so deck.gl knows when to recolour
   animating: () => false, // true while an overlay needs continuous frames
   dock: () => null,       // {x, y} to dock the card at a fixed spot instead of beside its object
+  pickPoint: null,        // ([lon, lat]) => true to take a click as a point on the ground
 };
 
 /* Moving-entity history, kept client-side so TripsLayer has something to draw. The
@@ -1085,7 +1086,14 @@ function bindMapClicks() {
     // A drag (orbit, pan) or a long press is not a click.
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5 || e.timeStamp - down.t > 700) return;
     const rect = el.getBoundingClientRect();
-    const info = deckgl.pickObject({x: e.clientX - rect.left, y: e.clientY - rect.top, radius: 2});
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    // An overlay waiting for a spot on the map (where an event meets) takes the click.
+    if (hooks.pickPoint) {
+      const viewport = deckgl.getViewports()[0];
+      const lonlat = viewport?.unproject([x, y]);
+      if (lonlat && hooks.pickPoint(lonlat.slice(0, 2))) return;
+    }
+    const info = deckgl.pickObject({x, y, radius: 2});
     handleMapClick(info);
   });
 }

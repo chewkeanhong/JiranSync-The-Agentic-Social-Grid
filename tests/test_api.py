@@ -6,7 +6,7 @@
 4. A neighbour accepts; the credits are locked in escrow.
 5. GPS shows both arrived at the station; the driver is paid.
 6. The driver redeems the credits at a local cafe for an RM discount, and the cafe
-   claims its capped rent rebate from SDP.
+   cashes its credits out with SDP.
 """
 
 from __future__ import annotations
@@ -90,9 +90,9 @@ def test_the_pitch_user_flow(client):
     # 6. The O2O loop: credits become a discount at an SDP tenant ...
     redeemed = client.post("/api/tenants/kopi/redeem", json={"actor": DRIVER, "credits": 3}).json()
     assert redeemed["discount_rm"] == 6.0
-    # ... and the tenant hands them back to SDP for rent, inside the 5% cap.
-    rebate = client.post("/api/tenants/kopi/rebate").json()
-    assert rebate["credits"] == 3 and rebate["rebate_rm"] <= rebate["cap_rm"]
+    # ... and the shop cashes all of them out with SDP, RM2 each.
+    paid = client.post("/api/tenants/kopi/cashout").json()
+    assert paid["credits"] == 3 and paid["rm"] == 3 * 2.0
 
     economy = client.get("/api/economy").json()
     assert economy["ledger_sums_to_zero"]
@@ -111,15 +111,34 @@ def test_rule_violations_are_400s_with_readable_messages(client):
     assert r.status_code == 400
 
 
-def test_sdp_can_issue_a_bounty(client):
+def test_sdp_hosts_an_event_residents_join_and_check_in_volunteers_are_paid(client):
     world = client.get("/api/world").json()
-    building = world["buildings"]["features"][0]["id"]
-    r = client.post("/api/bounties", json={"title": "Photograph the broken swing",
-                                           "credits": 3, "building": building})
+    r = client.post("/api/community-events", json={
+        "title": "Paint the playground fence", "place_name": "Playground",
+        "lon": world["centre"]["lon"], "lat": world["centre"]["lat"],
+        "start_at": None, "duration_min": 30, "slots": 1, "credits": 3})
     assert r.status_code == 200, r.text
-    assert r.json()["kind"] == "bounty"
-    assert any(b["title"] == "Photograph the broken swing"
-               for b in client.get("/api/bounties").json())
+    event = r.json()
+    assert event["status"] == "live" and event["slots"] == 1
+    assert any(e["id"] == event["id"] for e in client.get("/api/community-events").json())
+
+    before = client.get("/api/me", params={"resident": "R001"}).json()["balance"]
+    r = client.post(f"/api/community-events/{event['id']}/join", json={"actor": "R001"})
+    assert r.status_code == 200, r.text
+    # The only place is taken.
+    r = client.post(f"/api/community-events/{event['id']}/join", json={"actor": "R002"})
+    assert r.status_code == 400 and "taken" in r.json()["error"]
+
+    # Walk Aisyah to the venue; arriving checks her in and a one-slot job pays at once.
+    grid = client.app.state.engine.grid
+    for _ in range(4000):
+        grid.step(2.5)
+        if grid.store.community_event(event["id"])["status"] == "ended":
+            break
+    assert grid.store.community_event(event["id"])["status"] == "ended"
+    after = client.get("/api/me", params={"resident": "R001"}).json()["balance"]
+    assert after == before + 3
+    assert client.get("/api/economy").json()["ledger_sums_to_zero"]
 
 
 def test_websocket_streams_snapshots(client):
@@ -241,20 +260,35 @@ def test_route_demo_prefers_the_driver_who_arrives_first_not_the_nearest(client)
 
 
 
-def test_demo_auto_accept_hands_a_new_request_to_the_best_match(client):
+def test_demo_mode_brings_offers_and_the_requester_chooses(client):
     assert client.post("/api/demo/auto-accept", json={"on": True}).json()["auto_accept"]
     try:
         rich = max((r for r in client.get("/api/residents").json()), key=lambda r: r["balance"])
         draft = client.post("/api/tasks/draft",
                             json={"actor": rich["id"], "text": "Need help carrying a cabinet"}).json()
-        best = draft["candidates"][0]["resident_id"]
+        pinged = [c["resident_id"] for c in draft["candidates"][:3]]
         task = client.post("/api/tasks", json={"actor": rich["id"],
                                                "understanding": draft["understanding"]}).json()["created"][0]
-        assert client.get(f"/api/tasks/{task['id']}").json()["status"] == "open"
-        advance(60)
-        after = client.get(f"/api/tasks/{task['id']}").json()
-        assert after["status"] in ("in_progress", "arrived", "completed")
-        assert after["provider"] == best
+        before = client.get("/api/me", params={"resident": rich["id"]}).json()["balance"]
+        # The pinged neighbours offer one after another; nothing is taken yet.
+        advance(150)
+        view = client.get(f"/api/tasks/{task['id']}").json()
+        assert view["status"] == "open" and len(view["offer_cards"]) == 3
+        assert [c["resident_id"] for c in view["offer_cards"]] and \
+            {c["resident_id"] for c in view["offer_cards"]} <= set(pinged) | {c["resident_id"] for c in draft["candidates"]}
+        assert sum(1 for c in view["offer_cards"] if c.get("recommended")) == 1
+        assert client.get("/api/me", params={"resident": rich["id"]}).json()["balance"] == before
+        # Taking it directly is not how help works...
+        helper = view["offer_cards"][0]["resident_id"]
+        r = client.post(f"/api/tasks/{task['id']}/accept", json={"actor": helper})
+        assert r.status_code == 400 and "offer" in r.json()["error"]
+        # ... the requester chooses, and only then are the credits held.
+        chosen = client.post(f"/api/tasks/{task['id']}/choose",
+                             json={"actor": rich["id"], "helper": helper}).json()
+        assert chosen["provider"] == helper and chosen["status"] in ("in_progress", "reserved")
+        statuses = {o["resident"]: o["status"] for o in chosen["offers"]}
+        assert statuses[helper] == "chosen" and list(statuses.values()).count("declined") == 2
+        assert client.get("/api/me", params={"resident": rich["id"]}).json()["escrow"] == task["credits"]
     finally:
         client.post("/api/demo/auto-accept", json={"on": False})
 

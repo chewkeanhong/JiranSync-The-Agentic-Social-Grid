@@ -1,4 +1,4 @@
-"""The Jiran Credits ledger: zero-sum peer to peer, escrow, redemption, the rebate cap."""
+"""The Jiran Credits ledger: zero-sum peer to peer, escrow, redemption, cash-out."""
 
 from __future__ import annotations
 
@@ -82,13 +82,14 @@ def test_refund_returns_escrow_to_the_requester():
     assert credits.refund(store, t, 2) == 0
 
 
-def test_bounties_are_minted_by_sdp_not_paid_by_a_resident():
+def test_event_rewards_are_minted_by_sdp_and_paid_once():
     store = Store()
-    t = task(requester="sdp", amount=4, kind="bounty")
-    credits.lock_escrow(store, t, 0)
-    credits.release(store, t, 0)
+    event = {"id": "E001", "title": "Lake clean-up", "credits": 4}
+    assert credits.pay_volunteer(store, event, "B", 0) == 4
     assert store.balance("B") == 4
     assert credits.circulating(store) == 4
+    with pytest.raises(credits.CreditError):
+        credits.pay_volunteer(store, event, "B", 0)
 
 
 def test_redeem_converts_credits_to_a_ringgit_discount():
@@ -102,17 +103,15 @@ def test_redeem_converts_credits_to_a_ringgit_discount():
         credits.redeem(store, "A", tenant, 5, 0)
 
 
-def test_rent_rebate_is_capped_at_five_percent_and_holds_the_rest_over():
+def test_a_shop_cashes_out_every_credit_it_collected():
     store = Store()
-    tenant = {"id": "cafe", "name": "Cafe", "monthly_rent_rm": 100.0}   # cap RM5 = 2 credits
-    for rid in "ABCD":
+    tenant = {"id": "cafe", "name": "Cafe", "monthly_rent_rm": 100.0}
+    for rid in ("A", "B"):
         credits.grant_seed(store, rid)
-        credits.redeem(store, rid, tenant, 1, 0)
-    first = credits.claim_rebate(store, tenant, "M1", 0)
-    assert first["credits"] == 2
-    assert first["rebate_rm"] <= 0.05 * 100.0
-    assert first["held_over"] == 2
-    # The month's cap is used up: nothing more moves until next month.
-    assert credits.claim_rebate(store, tenant, "M1", 1)["credits"] == 0
-    assert credits.claim_rebate(store, tenant, "M2", 2)["credits"] == 2
+        credits.redeem(store, rid, tenant, 3, 0)
+    paid = credits.cash_out(store, tenant, 0)
+    assert paid == {"credits": 6, "rm": 6 * credits.RM_PER_CREDIT}
+    assert store.balance(credits.tenant_account("cafe")) == 0
+    assert store.balance(credits.TREASURY) == 6
+    assert credits.cash_out(store, tenant, 1)["credits"] == 0
     assert sum(store.all_balances().values()) == 0

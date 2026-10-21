@@ -1,4 +1,4 @@
-/* Cards: what opens when you tap a request, a neighbour, a shop or a station.
+/* Cards: what opens when you tap a request, a neighbour, a shop, a station or an SDP event.
  *
  * Each returns {html, actions, tone} for the map core's floating card (app.js
  * renderInspector). Actions are keyed by the `data-act` of their button. Every button does
@@ -23,17 +23,71 @@ function verifiedTag() {
 }
 
 const TASK_STEPS = ['Posted', 'Matched', 'On the way', 'Done'];
+// Help goes through offers: posted, neighbours offer, the requester chooses, it happens.
+const OFFER_STEPS = ['Posted', 'Offers', 'Chosen', 'On the way', 'Done'];
 function stepIndex(t) {
+  if (t.offers_mode) {
+    if (t.status === 'open') return (t.offers || []).some((o) => o.status === 'offered') ? 1 : 0;
+    return {reserved: 2, in_progress: 3, arrived: 3, completed: 4}[t.status] ?? 0;
+  }
   return {open: 0, reserved: 1, in_progress: 2, arrived: 2, completed: 3}[t.status] ?? 0;
 }
 function stepper(t) {
-  const at = stepIndex(t) + (t.status === 'in_progress' || t.status === 'arrived' ? 0 : 0);
-  const matched = t.status !== 'open';
-  return `<ol class="steps">${TASK_STEPS.map((label, i) => {
-    const done = i < at || (i === 1 && matched) || (i === at && t.status === 'completed');
+  const at = stepIndex(t);
+  const steps = t.offers_mode ? OFFER_STEPS : TASK_STEPS;
+  return `<ol class="steps">${steps.map((label, i) => {
+    const done = i < at || (i === at && t.status === 'completed');
     const now = i === at && t.status !== 'completed';
     return `<li class="${done ? 'done' : ''} ${now ? 'now' : ''}"><i></i><span>${label}</span></li>`;
   }).join('')}</ol>`;
+}
+
+/* What connects a neighbour to you, as small tags: a past favour (gold), a new face
+ * (green), an SDP event or a street you share (blue). */
+function tieTags(ties) {
+  return (ties || []).map((t) => {
+    const cls = /^New to you/.test(t) ? 'new' : /helped/i.test(t) ? 'known' : 'shared';
+    const ic = cls === 'new' ? 'sparkle' : cls === 'known' ? 'heart' : /going|volunteered/.test(t) ? 'flag' : 'home';
+    return `<span class="tie ${cls}">${icon(ic, 11)}${esc(t)}</span>`;
+  }).join('');
+}
+
+const offersOpen = (t) => (t.offers || []).filter((o) => o.status === 'offered');
+const myOffer = (t) => (t.offers || []).find((o) => o.resident === jiran.me) || null;
+
+/** Who the requester chooses from: the pinged neighbours from the moment it's posted
+ *  ("asked", waiting for their reply) and everyone who offers, best fit marked. */
+function offerList(id, t, d, actions) {
+  const cards = (d.offer_cards || []).filter((c) => c.status === 'offered' || c.status === 'asked');
+  if (!cards.length) {
+    const pinged = t.pinged || [];
+    return `<div class="offers-empty">${icon('clock', 16)}<div><b>Waiting for offers</b>
+      <span>${pinged.length ? `We pinged ${pinged.map((p) => esc(firstName(p))).join(', ')} — anyone nearby can offer too.` : 'Neighbours nearby can offer to help.'}</span></div>
+      ${pinged.length ? avatarStack(pinged, 24) : ''}</div>`;
+  }
+  const rows = cards.map((c) => {
+    actions[`choose-${c.resident_id}`] = () => act(`/api/tasks/${id}/choose`, {actor: jiran.me, helper: c.resident_id},
+      (o) => (o.status === 'reserved'
+        ? `You chose ${firstName(c.resident_id)} — booked for ${dayTimeLabel(o.start_at)}, ${credits(o.credits)} held`
+        : `You chose ${firstName(c.resident_id)} — ${credits(o.credits)} held, they're on the way`));
+    actions[`see-${c.resident_id}`] = () => { jiran.profileFrom = id; openResident(c.resident_id, true); };
+    return `<div class="offer ${c.recommended ? 'rec' : ''} ${c.status === 'asked' ? 'waiting' : ''}">
+        <button class="offer-who" data-act="see-${c.resident_id}">${avatarHtml(c.resident_id, {size: 38, verified: true})}</button>
+        <button class="offer-main" data-act="see-${c.resident_id}" title="See ${esc(c.name.split(' ')[0])}’s profile">
+          <span class="offer-name"><b>${esc(c.name)}</b>${c.recommended ? `<span class="rec-tag">${icon('star', 11)}Recommended</span>` : ''}</span>
+          <em>${esc((c.reasons || []).slice(0, 3).join(' · '))}</em>
+          <span class="offer-more">View profile ${icon('chevronRight', 11)}</span>
+        </button>
+        ${c.status === 'offered'
+          ? `<button class="btn sm ${c.recommended ? 'primary' : ''}" data-act="choose-${c.resident_id}">Choose</button>`
+          : `<span class="asked">${icon('clock', 12)}Asked</span>`}
+        ${c.ties?.length ? `<div class="ties">${tieTags(c.ties)}</div>` : ''}
+      </div>`;
+  }).join('');
+  const n = offersOpen(t).length;
+  return `<div class="rc-sec">${icon('users', 12)}Choose who helps · ${n} of ${cards.length} ready</div>
+    <div class="offers">${rows}</div>
+    <p class="offers-note">${n < cards.length ? 'You can choose someone as soon as they say yes. ' : ''}Nothing is paid until you choose.</p>`;
 }
 
 /* "3 Credits" and, behind a toggle, how the AI got there. */
@@ -46,7 +100,7 @@ function rewardBox(t, open = false) {
     if (v.skill_multiplier > 1) rows.push(['Skill needed', `×${v.skill_multiplier}`]);
     if (v.urgency_multiplier > 1) rows.push(['Urgency', `×${v.urgency_multiplier}`]);
   }
-  const label = t.kind === 'bounty' ? 'SDP reward' : 'AI suggested reward';
+  const label = 'AI suggested reward';
   return `<div class="reward-box">
       <div class="rb-top"><div><span class="rb-label">${icon('sparkle', 13)}${label}</span>
         <b class="rb-value">${credits(t.credits)}</b><span class="rb-rm">≈ RM${t.credits * 2} at local shops</span></div>
@@ -64,9 +118,8 @@ function taskCard(id) {
   const catKey = catOf(t);
   const cat = CATEGORIES[catKey];
   const d = jiran.taskDetail.get(id) || {};
-  const mine = t.requester === jiran.me;
-  const helping = t.provider === jiran.me;
-  const sdp = t.requester === 'sdp';
+  const mine = t.requester === jiran.me && !jiran.admin;
+  const helping = t.provider === jiran.me && !jiran.admin;
   const dist = distFromMe(t.lon, t.lat);
   const hub = t.kind === 'ride' ? hubById(t.dest_id) : null;
   const actions = {};
@@ -74,15 +127,39 @@ function taskCard(id) {
   // -- what the AI noticed ---------------------------------------------------------
   let insight = '';
   const cands = d.candidates || [];
-  const forMe = t.invitee === jiran.me;
+  const forMe = t.invitee === jiran.me && !jiran.admin;
   const booking = t.start_at != null;
-  if (t.status === 'open' && t.invitee) {
+  const offering = t.offers_mode && t.status === 'open';
+  const mineOffer = !jiran.admin ? myOffer(t) : null;
+  let offers = '';
+  if (offering && mine) {
+    offers = offerList(id, t, d, actions);
+    insight = aiInsight(`<b>Recommended</b> is the best fit by skill, walking time, free time, reliability and who you know.`);
+  } else if (offering && jiran.admin) {
+    const n = offersOpen(t).length;
+    insight = aiInsight(n
+      ? `<b>${n} offer${n === 1 ? '' : 's'}</b> from ${offersOpen(t).map((o) => esc(firstName(o.resident))).join(', ')} — waiting for ${esc(firstName(t.requester))} to choose.`
+      : `<b>Pinged ${(t.pinged || []).map((p) => esc(firstName(p))).join(', ') || 'nobody yet'}</b> — waiting for offers.`,
+      avatarStack(n ? offersOpen(t).map((o) => o.resident) : (t.pinged || []), 24));
+  } else if (offering && mineOffer?.status === 'offered') {
+    insight = aiInsight(`<b>Offer sent.</b> Waiting for ${esc(firstName(t.requester))} to choose — your credits come when the job's done.`);
+  } else if (t.offers_mode && mineOffer?.status === 'declined') {
+    insight = aiInsight(`${esc(firstName(t.requester))} chose another neighbour this time — thank you for offering.`);
+  } else if (t.status === 'open' && t.invitee) {
     insight = aiInsight(forMe
       ? `<b>${esc(firstName(t.requester))} asked you directly</b>${booking ? ` for <b>${esc(dayTimeLabel(t.start_at))}</b>, in your free time` : ''}.`
       : `<b>Asked ${mine ? '' : `by ${esc(firstName(t.requester))} `}only ${esc(firstName(t.invitee))}</b>${booking ? ` for ${esc(dayTimeLabel(t.start_at))}` : ''}. Waiting for them to confirm.`);
   } else if (t.status === 'reserved' && t.provider) {
     insight = aiInsight(`<b>Booked for ${esc(dayTimeLabel(t.start_at))}.</b> ${helping ? 'You’ll' : `${esc(firstName(t.provider))} will`} set off then. ${credits(t.credits)} held in escrow.`);
-  } else if (t.status === 'open' && cands.length) {
+  } else if (t.status === 'open' && jiran.admin) {
+    const pinged = (t.pinged || []);
+    insight = aiInsight(pinged.length
+      ? `<b>Pinged ${pinged.map((id) => esc(firstName(id))).join(', ')}</b> — the top matches by skill, walking time, free time and reliability.`
+      : '<b>Waiting for a match.</b>', pinged.length ? avatarStack(pinged, 24) : '');
+  } else if (t.status === 'open' && pingedMe(t)) {
+    insight = aiInsight(`<b>You’re one of the best matches for this.</b> ${esc(firstName(t.requester))} asked the grid and JiranSync picked you.` +
+      (t.offers_mode ? ' Offer to help, and they choose who comes.' : ''));
+  } else if (t.status === 'open' && cands.length && mine) {
     const heading = cands.filter((c) => c.direction);
     if (t.kind === 'ride' && heading.length) {
       insight = aiInsight(`<b>${heading.length} neighbour${heading.length > 1 ? 's are' : ' is'} heading to ${esc(t.dest_name)}</b>` +
@@ -109,9 +186,18 @@ function taskCard(id) {
 
   // -- what you can do -------------------------------------------------------------
   const buttons = [];
-  if (t.status === 'open' && !mine && (!t.invitee || forMe)) {
+  if (offering && !mine && !jiran.admin) {
+    if (mineOffer?.status === 'offered') {
+      buttons.push(`<button class="btn ghost" data-act="withdraw">Withdraw offer</button>`);
+      actions.withdraw = () => act(`/api/tasks/${id}/withdraw`, {actor: jiran.me}, 'Offer withdrawn');
+    } else if (!mineOffer || mineOffer.status === 'withdrawn') {
+      buttons.push(`<button class="btn primary" data-act="offer">${icon('heart', 16)}Offer to help · ${credits(t.credits)}</button>`);
+      actions.offer = () => act(`/api/tasks/${id}/offer`, {actor: jiran.me},
+        () => `Offer sent — ${firstName(t.requester)} will choose who helps`);
+    }
+  } else if (t.status === 'open' && !mine && !jiran.admin && (!t.invitee || forMe)) {
     const label = booking ? `Confirm for ${dayTimeLabel(t.start_at)}`
-      : {ride: 'Offer this ride', bounty: 'Take this bounty'}[t.kind] || 'I can help';
+      : t.kind === 'ride' ? 'Offer this ride' : 'I can help';
     buttons.push(`<button class="btn primary" data-act="accept">${icon(booking ? 'clock' : t.kind === 'ride' ? 'car' : 'heart', 16)}${label} · ${credits(t.credits)}</button>`);
     actions.accept = () => act(`/api/tasks/${id}/accept`, {actor: jiran.me},
       (o) => (o.status === 'reserved'
@@ -124,7 +210,8 @@ function taskCard(id) {
       (o) => `Thanks sent — ${credits(o.credits)} to ${firstName(o.provider)}`);
   }
   const helper = t.provider || t.invitee;
-  if (helper && helper !== jiran.me) {
+  // A resident sees the neighbour on their own job; SDP sees anyone's.
+  if (helper && helper !== jiran.me && (jiran.admin || mine)) {
     buttons.push(`<button class="btn" data-act="who">${avatarHtml(helper, {size: 20})}See ${esc(firstName(helper))}</button>`);
     actions.who = () => openResident(helper, true);
   }
@@ -141,27 +228,26 @@ function taskCard(id) {
     renderInspector(true);
   };
 
-  const who = sdp
-    ? `<div class="cd-person">${`<span class="av sdp-av" style="width:36px;height:36px">${icon('megaphone', 18)}</span>`}
-        <div><b>SDP Property Management</b><span class="vtag">${icon('shield', 12)}Official bounty</span></div></div>`
-    : `<div class="cd-person">${avatarHtml(t.requester, {size: 36, verified: resident(t.requester)?.verified})}
+  const who = `<div class="cd-person">${avatarHtml(t.requester, {size: 36, verified: resident(t.requester)?.verified})}
         <div><b>${esc(nameOf(t.requester))}${mine ? ' (you)' : ''}</b>${verifiedTag()}</div></div>`;
 
   const where = t.kind === 'ride'
     ? infoRow('route', `${mine ? 'Your home' : `${esc(firstName(t.requester))}’s home`} ${icon('arrowRight', 12)} ${esc(t.dest_name || 'station')}`) +
       (hub ? infoRow('car', `${hub.road_km} km · ~${Math.max(5, Math.round(hub.road_km / 30 * 60))} min drive`) : '')
-    : infoRow('pin', mine ? 'At your home' : `${fmtDist(dist)} from you · ~${Math.max(1, Math.round((dist || 0) * 1.3 / 80))} min walk`);
+    : infoRow('pin', mine ? 'At your home' : jiran.admin ? `At ${esc(firstName(t.requester))}’s home`
+      : `${fmtDist(dist)} from you · ~${Math.max(1, Math.round((dist || 0) * 1.3 / 80))} min walk`);
 
   const html = `
-    <div class="cd-top"><span class="cd-cat" style="--c:${cat.color}">${icon(cat.icon, 14)}${t.kind === 'bounty' ? 'SDP Bounty' : cat.label}</span>
+    <div class="cd-top"><span class="cd-cat" style="--c:${cat.color}">${icon(cat.icon, 14)}${cat.label}</span>
       ${t.urgency >= 3 && t.status === 'open' ? `<span class="spill" style="--c:#f87171"><i></i>Urgent</span>` : ''}</div>
     <h3 class="cd-title">${esc(t.title)}</h3>
     ${who}
     <div class="cd-rows">${infoRow('clock', esc(whenOf(t)))}${where}</div>
     ${t.description && t.description.toLowerCase() !== t.title.toLowerCase() ? `<p class="cd-quote">“${esc(t.description)}”</p>` : ''}
     <div class="chips">${(t.skills || []).map((s) => `<span class="chip">${esc(s)}</span>`).join('')}</div>
-    ${t.status !== 'open' || mine ? stepper(t) : ''}
+    ${t.status !== 'open' || mine || jiran.admin ? stepper(t) : ''}
     ${rewardBox(t, cardState.why.has(id))}
+    ${offers}
     ${insight}
     ${buttons.length ? `<div class="cd-actions">${buttons.join('')}</div>` : ''}`;
   return {html, actions, tone: catKey};
@@ -201,9 +287,36 @@ function residentCard(id) {
   const buttons = [];
   const first = r.name.split(' ')[0];
   const skill = (r.skills || []).find((k) => k !== 'driving');
+  // Opened from the offers on your request: how they fit it, and choose them from here.
+  const from = jiran.profileFrom && !jiran.admin ? taskById(jiran.profileFrom) : null;
+  const offer = from && from.requester === jiran.me && from.status === 'open'
+    ? (jiran.taskDetail.get(from.id)?.offer_cards || []).find((c) => c.resident_id === id) : null;
+  let fit = '';
+  if (offer) {
+    fit = `<div class="rc-fit ${offer.recommended ? 'rec' : ''}">
+        <div class="rc-sec">${icon('sparkle', 12)}Why ${esc(first)} fits “${esc(from.title)}”
+          ${offer.recommended ? `<span class="rec-tag">${icon('star', 11)}Recommended</span>` : ''}</div>
+        <em>${esc((offer.reasons || []).join(' · '))}</em>
+        ${offer.ties?.length ? `<div class="ties">${tieTags(offer.ties)}</div>` : ''}
+      </div>`;
+    if (offer.status === 'offered') {
+      buttons.push(`<button class="btn primary" data-act="choose">${icon('check', 16)}Choose ${esc(first)}</button>`);
+      actions.choose = async () => {
+        const out = await act(`/api/tasks/${from.id}/choose`, {actor: jiran.me, helper: id},
+          (o) => (o.status === 'reserved'
+            ? `You chose ${first} — booked for ${dayTimeLabel(o.start_at)}, ${credits(o.credits)} held`
+            : `You chose ${first} — ${credits(o.credits)} held, they're on the way`));
+        if (out) openTask(from.id);
+      };
+    } else {
+      buttons.push(`<span class="asked">${icon('clock', 12)}Asked · waiting for ${esc(first)} to reply</span>`);
+    }
+    buttons.push(`<button class="btn" data-act="back">${icon('arrowRight', 15, 'flip')}Back to offers</button>`);
+    actions.back = () => openTask(from.id);
+  }
   const asks = [];
-  if (!you && r.has_car && hub) asks.push({key: 'ride', icon: 'car', what: 'a ride', text: `Need a ride to ${hub.name}`});
-  if (!you && skill) asks.push({key: 'ask', icon: 'wrench', what: `help with ${skill}`, text: `Need help with ${skill}`});
+  if (!you && !jiran.admin && !offer && r.has_car && hub) asks.push({key: 'ride', icon: 'car', what: 'a ride', text: `Need a ride to ${hub.name}`});
+  if (!you && !jiran.admin && !offer && skill) asks.push({key: 'ask', icon: 'wrench', what: `help with ${skill}`, text: `Need help with ${skill}`});
   const free = freeNow(r);
   let booking = '';
   if (free) {
@@ -236,9 +349,11 @@ function residentCard(id) {
       <div>
         <h3 class="cd-title">${esc(r.name)}${you ? ' <em>(you)</em>' : ''}</h3>
         ${r.verified ? verifiedTag() : ''}
-        <div class="rc-sub">${esc(r.unit || '')} · ${fmtDist(distFromMe(r.lon, r.lat)) || 'nearby'}${you ? '' : ' from you'}</div>
+        <div class="rc-sub">${jiran.admin ? `${esc(r.unit || '')} · ${esc(r.id)}`
+          : you ? esc(r.unit || '') : `${fmtDist(distFromMe(r.lon, r.lat)) || 'Nearby'} from you`}</div>
       </div>
     </div>
+    ${fit}
     <div class="rc-doing" style="--c:${STATUSES[s.status].color}">${icon(doingIcon, 16)}<span>${esc(s.doing)}</span>${s.status === 'available' ? '' : statusPill(s.status)}</div>
     <div class="cd-rows">
       ${infoRow('briefcase', r.occupation ? esc(r.occupation) : '<span class="muted">Occupation not shared</span>')}
@@ -267,6 +382,7 @@ function residentCard(id) {
 function tenantCard(id) {
   const t = tenantById(id);
   if (!t) return null;
+  if (jiran.admin) return tenantAdminCard(t);
   const bal = jiran.meData?.balance ?? 0;
   const actions = {};
   const buttons = [1, 3].map((n) => {
@@ -283,9 +399,110 @@ function tenantCard(id) {
     <div class="cd-rows">${infoRow('gift', esc(t.offer))}${infoRow('pin', `${fmtDist(distFromMe(t.lon, t.lat))} from you`)}</div>
     <div class="reward-box"><div class="rb-top"><div><span class="rb-label">${icon('coin', 13)}Your credits here</span>
       <b class="rb-value">RM${bal * 2}</b><span class="rb-rm">${credits(bal)} · 1 credit = RM2 off</span></div></div></div>
-    ${aiInsight(`Spending credits here keeps business in Elmina — ${esc(t.name)} gets up to 5% off its rent from SDP.`)}
+    ${aiInsight(`Spending credits here keeps business in Elmina — ${esc(t.name)} cashes every credit out with SDP at RM2.`)}
     <div class="cd-actions">${buttons.join('')}</div>`;
   return {html, actions, tone: 'commercial'};
+}
+
+function tenantAdminCard(t) {
+  const st = jiran.tenantStats[t.id] || {};
+  const held = st.held_credits ?? 0;
+  const actions = {
+    cashout: async () => {
+      await act(`/api/tenants/${t.id}/cashout`, {}, (o) => `${t.name} cashed out ${credits(o.credits)} → RM${o.rm.toFixed(2)} from SDP`);
+      refreshTenantStats();
+    },
+  };
+  const html = `
+    <div class="shop-hero" style="--c:${CATEGORIES.commercial.color}">${icon('store', 28)}</div>
+    <div class="cd-top"><span class="cd-cat" style="--c:${CATEGORIES.commercial.color}">${icon('store', 14)}${esc(t.category)}</span>
+      <span class="vtag">${icon('shield', 12)}SDP tenant</span></div>
+    <h3 class="cd-title">${esc(t.name)}</h3>
+    <div class="cd-rows">${infoRow('gift', esc(t.offer))}</div>
+    <div class="reward-box"><div class="rb-top"><div><span class="rb-label">${icon('coin', 13)}Credits collected</span>
+      <b class="rb-value">${credits(held)}</b><span class="rb-rm">RM${held * 2} of discounts given to residents</span></div></div></div>
+    ${aiInsight(`<b>Worth RM${held * 2} to ${esc(t.name)}.</b> Residents paid with credits; SDP buys every one back at RM2, so a discount never costs the shop.`)}
+    <div class="cd-actions"><button class="btn primary" data-act="cashout" ${held ? '' : 'disabled'}>${icon('swap', 16)}Cash out ${credits(held)} · RM${held * 2}</button></div>`;
+  return {html, actions, tone: 'commercial'};
+}
+
+const SIGNUP_LABEL = {joined: ['Joined', 'open'], checked_in: ['Checked in (GPS)', 'completed'],
+  paid: ['Paid', 'completed'], no_show: ['Didn’t turn up', 'cancelled']};
+
+/** An SDP event. Residents join or leave; SDP sees every volunteer and runs the event. */
+function eventCard(id) {
+  const e = eventById(id);
+  if (!e) return null;
+  const cat = CATEGORIES.community;
+  const mine = myEventSignup(e);
+  const live = e.status === 'live';
+  const ended = e.status === 'ended';
+  const full = e.joined >= e.slots;
+  const dist = distFromMe(e.lon, e.lat);
+  const actions = {};
+  const buttons = [];
+  const hours = e.duration_min >= 60 ? `${+(e.duration_min / 60).toFixed(1)} h` : `${e.duration_min} min`;
+
+  let insight = '';
+  if (jiran.admin) {
+    if (!ended) {
+      if (e.status === 'upcoming') {
+        buttons.push(`<button class="btn primary" data-act="start">${icon('flag', 16)}Start now</button>`);
+        actions.start = () => act(`/api/community-events/${id}/start`, {}, (o) => `${o.title} has started — volunteers are on the way`);
+      }
+      buttons.push(`<button class="btn ${live ? 'primary' : ''}" data-act="end">${icon('coin', 16)}End & pay</button>`);
+      actions.end = () => act(`/api/community-events/${id}/end`, {},
+        (o) => `${o.title} ended — ${o.checked_in} volunteer${o.checked_in === 1 ? '' : 's'} paid ${credits(o.credits)} each`);
+      buttons.push(`<button class="btn ghost" data-act="cancel">Cancel event</button>`);
+      actions.cancel = () => act(`/api/community-events/${id}/cancel`, {}, 'Event cancelled');
+    }
+    insight = aiInsight(live
+      ? `<b>${e.checked_in} of ${e.joined} checked in.</b> GPS checks volunteers in when they reach the venue. When the event ends, SDP pays everyone checked in.`
+      : ended ? `<b>Ended.</b> ${e.checked_in} volunteer${e.checked_in === 1 ? '' : 's'} paid ${credits(e.credits)} each.`
+      : `<b>${e.joined} of ${e.slots} places taken.</b> It starts by itself at ${esc(e.when)}; “Start now” opens it early for a demo.`);
+  } else if (mine) {
+    const going = {joined: live ? 'You’re on your way — GPS will check you in at the venue.' : `You’re going. We’ll remind you ${esc(e.when)}.`,
+      checked_in: `<b>You’re checked in.</b> ${credits(e.credits)} lands in your wallet when the event ends.`,
+      paid: `<b>Thank you!</b> ${credits(e.credits)} from SDP is in your wallet.`,
+      no_show: 'You didn’t make it this time.'}[mine.status];
+    insight = aiInsight(going);
+    if (mine.status === 'joined') {
+      buttons.push(`<button class="btn ghost" data-act="leave">Leave event</button>`);
+      actions.leave = () => act(`/api/community-events/${id}/leave`, {actor: jiran.me}, 'You’ve left the event');
+    }
+  } else if (!ended) {
+    insight = aiInsight(`Volunteer and earn <b>${credits(e.credits)}</b> from SDP — paid when GPS shows you were there.`);
+    buttons.push(`<button class="btn primary" data-act="join" ${full ? 'disabled' : ''}>${icon('users', 16)}${full ? 'All places taken' : `Join · earn ${credits(e.credits)}`}</button>`);
+    actions.join = () => act(`/api/community-events/${id}/join`, {actor: jiran.me},
+      (o) => (o.status === 'live' ? `You’ve joined ${o.title} — head over now` : `You’re going to ${o.title} · ${o.when}`));
+  }
+
+  const going = jiran.admin
+    ? `<div class="rc-sec">${icon('users', 12)}Volunteers</div>
+       <div class="signups">${e.signups.map((s) => {
+         const [label, cls] = SIGNUP_LABEL[s.status] || [s.status, ''];
+         return `<button class="su" data-act="who-${s.resident}">${avatarHtml(s.resident, {size: 24})}<b>${esc(s.name)}</b><span class="st st-${cls}">${label}</span></button>`;
+       }).join('') || '<p class="muted">Nobody has joined yet.</p>'}</div>`
+    : e.joined ? `<div class="going">${icon('users', 16)}<span><b>${e.joined}</b> neighbour${e.joined === 1 ? '' : 's'} going</span></div>` : '';
+  if (jiran.admin) for (const s of e.signups) actions[`who-${s.resident}`] = () => openResident(s.resident, true);
+
+  const html = `
+    <div class="cd-top"><span class="cd-cat" style="--c:${cat.color}">${icon('flag', 14)}SDP event</span>
+      ${live ? `<span class="spill" style="--c:#34d399"><i></i>Happening now</span>` : ended ? `<span class="spill" style="--c:#7c8698"><i></i>Ended</span>` : ''}</div>
+    <h3 class="cd-title">${esc(e.title)}</h3>
+    <div class="cd-person"><span class="av sdp-av" style="width:36px;height:36px">${icon('megaphone', 18)}</span>
+      <div><b>SDP Property Management</b><span class="vtag">${icon('shield', 12)}Official event</span></div></div>
+    <div class="cd-rows">
+      ${infoRow('clock', e.start_at == null ? 'Any time · one-off job' : `${esc(e.when)} · ${hours}`)}
+      ${infoRow('pin', `${esc(e.place_name || 'In the township')}${dist != null ? ` · ${fmtDist(dist)} from you` : ''}`)}
+    </div>
+    ${e.description ? `<p class="cd-quote">${esc(e.description)}</p>` : ''}
+    <div class="slots-bar"><div><span>${e.joined} of ${e.slots} places taken</span><b>${credits(e.credits)} each</b></div>
+      <i style="--w:${Math.round(Math.min(1, e.joined / e.slots) * 100)}%"></i></div>
+    ${going}
+    ${insight}
+    ${buttons.length ? `<div class="cd-actions">${buttons.join('')}</div>` : ''}`;
+  return {html, actions, tone: 'community'};
 }
 
 function hubCard(id) {

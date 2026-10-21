@@ -10,8 +10,23 @@ Lifecycle of a task::
       \\                  |                                    (rides complete on arrival)
        cancel         no-show: refund + strike, back to open
 
+Help is not first-come: it is "offers, then you choose". Neighbours offer; the requester
+picks one, and only then are their credits held in escrow. A job with a time starts at
+that time (``reserved`` until then). Rides, and a request sent to one named neighbour,
+are still accepted directly -- a lift is urgent and any driver will do.
+
+    open --offer, offer, ...--> open --choose--> reserved/in_progress --> ...
+
 Credits move only through ``credits.py``: escrow is locked on accept, released on
 completion, refunded on cancel or no-show.
+
+SDP community events run beside the tasks::
+
+    upcoming --start time--> live --end time--> ended
+                 volunteers walk over;      SDP pays everyone GPS checked in
+
+A one-off civic job ("photograph the broken streetlight") is an event with one slot and
+no start time: it is live from the moment it is posted and ends when its volunteer checks in.
 
 Movement is simulated: residents walk or drive along the real street graph at real
 speeds, run ``TIME_SCALE`` times faster than the wall clock so a carpool to the MRT
@@ -24,6 +39,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,14 +61,22 @@ MAX_BOOKING_S = 7 * 24 * 3600
 # Demo auto-accept: how long (simulated seconds) after a request is posted the best match
 # takes it -- a few real seconds, long enough to see the request appear first.
 AUTO_ACCEPT_S = 40.0
+# Demo mode, for help: the pinged neighbours offer one after another, this far apart.
+AUTO_OFFER_S = 30.0
+# Offers per request the demo sends by itself; the presenter then chooses.
+AUTO_OFFERS = 3
+# A help request nobody was chosen for closes this long after its start time.
+EXPIRE_AFTER_S = 3600.0
+# When a request names a part of the day but no time, it starts at the slot's usual hour.
+SLOT_START_MIN = {"morning": 9 * 60, "afternoon": 14 * 60, "evening": 19 * 60}
 
 WALK_MPS = 1.35
 DRIVE_MPS = 8.5
 
 # "Arrived" means within this many metres of the destination, for both parties.
 ARRIVAL_M = 30.0
-# Bounty proof-of-work must be geo-tagged within this distance of the bounty.
-PROOF_RADIUS_M = 60.0
+# A volunteer is checked in to an event when GPS puts them this close to the venue.
+EVENT_CHECKIN_M = 60.0
 # A provider whose position has not changed for this long is a no-show.
 NO_SHOW_S = 300.0
 # Help tasks auto-confirm after the job's own estimate on site, unless confirmed sooner.
@@ -71,6 +95,18 @@ CANCELLED = "cancelled"
 SPLIT = "split"
 LIVE = (OPEN, RESERVED, IN_PROGRESS, ARRIVED)
 
+# Community events.
+UPCOMING = "upcoming"
+EVENT_LIVE = "live"
+ENDED = "ended"
+EVENT_CANCELLED = "cancelled"
+MAX_EVENT_SLOTS = 50
+# Demo mode: neighbours sign up for SDP events by themselves, one every so often, always
+# leaving a place free so the presenter can join too.
+AUTO_JOIN_EVERY_S = 300.0
+# The demo personas the pitch is written around never act on their own.
+PERSONAS = ("R001", "R002", "R003")
+
 
 class GridError(ValueError):
     """A request the rules do not allow. The message is safe to show the user."""
@@ -87,6 +123,7 @@ class Mover:
     task_id: str | None = None
     leg: str = "go"               # "go", "pickup", "ride", "ambient"
     passenger: str | None = None
+    event_id: str | None = None   # walking to an SDP community event
     progress: float = 0.0
     frozen: bool = False
     still_since: float | None = None
@@ -143,6 +180,7 @@ class SocialGrid:
         self.movers: dict[str, Mover] = {}
         self._next_ambient = self.t + 5.0
         self._arrived_at: dict[str, float] = {}
+        self._next_auto_join = self.t + AUTO_JOIN_EVERY_S
         self.hubs = self._prepare_hubs(places.get("hubs", []))
 
     # ------------------------------------------------------------------ setup
@@ -324,18 +362,32 @@ class SocialGrid:
     def _requester_balance_committed(self, resident_id: str) -> int:
         """Credits a requester has promised on open, unfunded tasks."""
         return sum(int(t["credits"]) for t in self.store.tasks([OPEN])
-                   if t["requester"] == resident_id and t["kind"] != "bounty")
+                   if t["requester"] == resident_id)
 
     # ------------------------------------------------------------- drafting
 
     def draft(self, actor: str, text: str, *, invitee: str | None = None,
-              start_at: float | None = None, dest: dict | None = None) -> dict:
+              start_at: float | None = None, dest: dict | None = None,
+              when_at: float | None = None, asap: bool = False,
+              minutes: int | None = None) -> dict:
         """Understand a request, price it and preview who would be pinged. Nothing is saved.
 
         ``dest`` ({lon, lat, name}) makes it a ride to that place -- any building on the map,
-        not only a station."""
+        not only a station. ``when_at`` / ``asap`` and ``minutes`` are what the resident
+        picked on the draft for when and how long, over what the AI read from the text."""
         requester = self._resident(actor)
         understanding = agent.understand(text, self.hubs).to_dict()
+        if minutes:
+            understanding.update(est_minutes=int(min(480, max(10, minutes))), subtasks=[])
+        if asap:
+            understanding["start_choice"] = "asap"
+        elif when_at is not None:
+            when_at = float(when_at)
+            if when_at <= self.now:
+                raise GridError("that time has already passed; pick a later one")
+            if when_at - self.now > MAX_BOOKING_S:
+                raise GridError("requests can be made up to a week ahead")
+            understanding.update(start_choice=when_at, slot=self.slot_at(when_at))
         if dest:
             understanding.update(kind="ride", destination=None, subtasks=[],
                                  skills=understanding.get("skills") or ["driving"],
@@ -367,9 +419,25 @@ class SocialGrid:
             subtasks.append({"title": sub["title"], "skills": sub["skills"],
                              "est_minutes": sub["est_minutes"],
                              "valuation": sub_value.to_dict(),
-                             "candidates": [c.to_dict() for c in cands[:3]],
+                             "candidates": [c.to_dict() for c in self._pick_pinged(cands)],
                              "fallback": self._fallback(sub_task, cands)})
+        needs_when = False
+        if not invitee and task["kind"] == "help":
+            choice = u.get("start_choice")
+            start = (None if choice == "asap" else float(choice)) if choice is not None \
+                else self._planned_start(u)
+            task["start_at"] = start
+            if start is not None:
+                task["when"] = self.when_label(start)
+            elif choice == "asap":
+                task["when"] = "As soon as possible"
+            # Neighbours need to know when: the draft asks unless the resident said.
+            needs_when = start is None and choice is None
         cands = self._rank(task)
+        if not invitee:
+            # The three who will be pinged lead the list, in the order they are pinged.
+            pinged = self._pick_pinged(cands)
+            cands = pinged + [c for c in cands if c not in pinged]
         balance = credits.balance(self.store, requester["id"])
         cost = (sum(s["valuation"]["suggested"] for s in subtasks) if subtasks
                 else value.suggested)
@@ -390,6 +458,7 @@ class SocialGrid:
             "balance": balance,
             "available": balance - self._requester_balance_committed(requester["id"]),
             "cost": cost,
+            "needs_when": needs_when,
         }
 
     def _shape_task(self, requester: dict, u: dict) -> dict:
@@ -469,10 +538,103 @@ class SocialGrid:
         task["start_at"] = start
         return invitee
 
-    def _rank(self, task: dict, exclude: set[str] | None = None):
-        return matching.rank(task, self.store.residents(), network=self.networks.get("walk"),
-                             frame=self.town.frame, exclude=exclude,
-                             drive=self.networks.get("drive"))
+    def _rank(self, task: dict, exclude: set[str] | None = None, *,
+              residents: list[dict] | None = None, limit: int = 5):
+        return matching.rank(task, self.store.residents() if residents is None else residents,
+                             network=self.networks.get("walk"), frame=self.town.frame,
+                             exclude=exclude, drive=self.networks.get("drive"), limit=limit,
+                             social=self._social(task.get("requester")))
+
+    def _social(self, me: str | None) -> dict:
+        """What links each neighbour to ``me``: favours either way, SDP events side by side."""
+        out: dict[str, dict] = {}
+        if not me:
+            return out
+        for t in self.store.tasks([COMPLETED]):
+            if not t.get("provider") or t["kind"] == "bundle":
+                continue
+            if t["requester"] == me:
+                entry = out.setdefault(t["provider"], {"helped_me": 0, "i_helped": 0, "events": []})
+                entry["helped_me"] += 1
+            elif t["provider"] == me:
+                entry = out.setdefault(t["requester"], {"helped_me": 0, "i_helped": 0, "events": []})
+                entry["i_helped"] += 1
+        for e in self.store.community_events([UPCOMING, EVENT_LIVE, ENDED]):
+            going = {g["resident"] for g in self.store.signups(e["id"]) if g["status"] != "no_show"}
+            if me not in going:
+                continue
+            for other in going - {me}:
+                entry = out.setdefault(other, {"helped_me": 0, "i_helped": 0, "events": []})
+                entry["events"].append((e["title"], e["status"] != ENDED))
+        return out
+
+    @staticmethod
+    def _pick_pinged(cands: list) -> list:
+        """The three a request pings: the two best matches, and -- when one of them is
+        someone you already know -- the best match you have never dealt with, so the
+        grid keeps introducing neighbours instead of circling the same few."""
+        if len(cands) <= 3:
+            return list(cands[:3])
+        top = list(cands[:2])
+        if any(c.familiar for c in top):
+            fresh = next((c for c in cands[2:] if not c.familiar and not c.ties_new
+                          and c.score >= matching.MIN_MATCH_SCORE), None)
+            if fresh is not None:
+                fresh.ties = ["New to you · meet a neighbour"] + (fresh.ties or [])
+                fresh.ties_new = True
+                return top + [fresh]
+        return list(cands[:3])
+
+    @staticmethod
+    def uses_offers(task: dict) -> bool:
+        """Help is "offers, then the requester chooses"; rides and direct asks are not."""
+        return task["kind"] == "help" and not task.get("invitee")
+
+    def _planned_start(self, u: dict) -> float | None:
+        """When a help request should start, from what the resident said: "tomorrow
+        evening", "Thu · 7:00 PM", "Sat · Morning". None means as soon as someone is chosen."""
+        label = (u.get("when") or "").lower()
+        slot = u.get("slot")
+        now_min = self.minute_of(self.now)
+        today = int(now_min // 1440)
+        weekday_said = False
+        day = None
+        if "tomorrow" in label:
+            day = today + 1
+        elif "today" in label or "tonight" in label:
+            day = today
+        elif "weekend" in label:
+            day = today + (5 - today % 7) % 7
+            weekday_said = True
+        else:
+            for i, name in enumerate(DAY_NAMES):
+                if re.search(rf"\b{name.lower()}", label):
+                    day = today + (i - today % 7) % 7
+                    weekday_said = True
+                    break
+        m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", label)
+        if m:
+            minute = (int(m.group(1)) % 12 + (12 if m.group(3) == "pm" else 0)) * 60 + int(m.group(2) or 0)
+        elif slot in SLOT_START_MIN:
+            minute = SLOT_START_MIN[slot]
+        elif "tonight" in label:
+            minute = 20 * 60
+        else:
+            minute = None
+        if day is None and minute is None:
+            return None
+        if day is None:
+            day = today if today * 1440 + minute > now_min else today + 1
+        if minute is None:
+            if day == today:
+                return None
+            minute = 9 * 60
+        start = day * 1440 + minute
+        if weekday_said and start <= now_min:
+            start += 7 * 1440
+        if start <= now_min:
+            return None
+        return self.demo_t_at(start)
 
     def _fallback(self, task: dict, candidates) -> dict | None:
         if not matching.needs_fallback(task, candidates):
@@ -509,7 +671,7 @@ class SocialGrid:
         available = credits.balance(self.store, actor) - self._requester_balance_committed(actor)
         if total > available:
             raise GridError(f"you have {available} credits free; this needs {total}. "
-                            "Earn more by helping a neighbour or taking an SDP bounty.")
+                            "Earn more by helping a neighbour or volunteering at an SDP event.")
 
         created = []
         parent_id = None
@@ -558,37 +720,15 @@ class SocialGrid:
                 continue
             if self.auto_accept:
                 self._auto_due[task_id] = self.t + AUTO_ACCEPT_S
-            pinged = self._rank(task)[:3]
+            pinged = self._pick_pinged(self._rank(task))
+            self.store.update_task(task_id, pinged=[c.resident_id for c in pinged])
             names = ", ".join(c.name.split()[0] for c in pinged) or "nobody in reach yet"
+            when = f" for {self.when_label(task['start_at'])}" if task.get("start_at") else ""
             self.store.log(self.t, "posted",
-                           f"{requester['name']} asked: {task['title']} ({amount} cr) "
+                           f"{requester['name']} asked: {task['title']}{when} ({amount} cr) "
                            f"— pinged {names}", task_id, actor)
             created.append({**task, "pinged": [c.to_dict() for c in pinged]})
         return created
-
-    def create_bounty(self, *, title: str, skills: list[str], credits_amount: int,
-                      lon: float | None = None, lat: float | None = None,
-                      building: str | None = None, est_minutes: int = 30,
-                      description: str = "", when: str | None = None) -> dict:
-        """SDP property management posts a paid civic micro-task. Funded from the mint."""
-        if building and self.town.has_building(building):
-            b = self.town.building(building)
-            lon, lat = (float(v) for v in self.town.frame.to_lonlat(*b.centroid_xy))
-        if lon is None or lat is None:
-            raise GridError("a bounty needs a location")
-        credits_amount = int(credits_amount)
-        if not 1 <= credits_amount <= valuation.MAX_CREDITS:
-            raise GridError(f"bounties pay 1-{valuation.MAX_CREDITS} credits")
-        task_id = self.store.next_task_id()
-        self.store.add_task(id=task_id, requester="sdp", title=title, description=description,
-                            kind="bounty", skills=skills, skill_level=0, lon=lon, lat=lat,
-                            when_label=when or "Any time",
-                            building=building, urgency=1, est_minutes=est_minutes,
-                            credits=credits_amount, status=OPEN, source="sdp",
-                            valuation={"explanation": "set by SDP property management"},
-                            created_t=self.t, updated_t=self.t)
-        self.store.log(self.t, "bounty", f"SDP bounty: {title} ({credits_amount} cr)", task_id)
-        return self.store.task(task_id)
 
     # ------------------------------------------------------------ execution
 
@@ -606,7 +746,13 @@ class SocialGrid:
         if task.get("invitee") and task["invitee"] != actor:
             raise GridError("this request is only for "
                             f"{self._resident(task['invitee'])['name'].split()[0]}")
+        if self.uses_offers(task):
+            raise GridError("offer to help instead — the requester chooses who they'd like")
+        return self._take(task, provider)
 
+    def _take(self, task: dict, provider: dict) -> dict:
+        """Hold the requester's credits and book or start the job with ``provider``."""
+        task_id, actor = task["id"], provider["id"]
         task = {**task, "provider": actor}
         try:
             credits.lock_escrow(self.store, task, self.t)
@@ -620,6 +766,98 @@ class SocialGrid:
                            "in escrow", task_id, actor)
             return self.store.task(task_id)
         return self._dispatch(task, provider)
+
+    # --------------------------------------------------------------- offers
+
+    def offer(self, task_id: str, actor: str) -> dict:
+        """A neighbour offers to take a help request. Nothing is held until they're chosen."""
+        task = self._task(task_id)
+        helper = self._resident(actor)
+        if not self.uses_offers(task):
+            raise GridError("this request is accepted directly, not by offer")
+        if task["status"] != OPEN:
+            raise GridError(f"{task['title']} is no longer open")
+        if task["requester"] == actor:
+            raise GridError("you cannot offer on your own request")
+        if helper["suspended"]:
+            raise GridError("this account is suspended pending review")
+        mine = next((o for o in self.store.offers(task_id) if o["resident"] == actor), None)
+        if mine and mine["status"] == "offered":
+            raise GridError("you've already offered — waiting for them to choose")
+        if mine and mine["status"] in ("declined", "no_show"):
+            raise GridError("they've already chosen for this request")
+        self.store.set_offer(task_id, actor, "offered", self.t)
+        requester = self._resident(task["requester"])
+        self.store.log(self.t, "offered", f"{helper['name']} offered to help "
+                       f"{requester['name']} with {task['title']}", task_id, actor)
+        return self.store.task(task_id)
+
+    def withdraw(self, task_id: str, actor: str) -> dict:
+        task = self._task(task_id)
+        mine = next((o for o in self.store.offers(task_id) if o["resident"] == actor), None)
+        if mine is None or mine["status"] != "offered":
+            raise GridError("you have no open offer on this request")
+        self.store.set_offer(task_id, actor, "withdrawn", self.t)
+        self.store.log(self.t, "withdrawn", f"{self._resident(actor)['name']} withdrew their "
+                       f"offer for {task['title']}", task_id, actor)
+        return self.store.task(task_id)
+
+    def choose(self, task_id: str, actor: str, helper_id: str) -> dict:
+        """The requester picks one offer. Their credits are held now; the others close."""
+        task = self._task(task_id)
+        if actor != task["requester"]:
+            raise GridError("only the requester chooses who helps")
+        if task["status"] != OPEN:
+            raise GridError(f"{task['title']} is no longer open")
+        offers = self.store.offers(task_id)
+        if not any(o["resident"] == helper_id and o["status"] == "offered" for o in offers):
+            raise GridError("that neighbour hasn't offered on this request")
+        helper = self._resident(helper_id)
+        if helper["suspended"]:
+            raise GridError(f"{helper['name'].split()[0]} can't take requests right now")
+        out = self._take(task, helper)
+        self.store.set_offer(task_id, helper_id, "chosen", self.t)
+        for o in offers:
+            if o["status"] == "offered" and o["resident"] != helper_id:
+                self.store.set_offer(task_id, o["resident"], "declined", self.t)
+        self.store.log(self.t, "chosen", f"{self._resident(actor)['name']} chose "
+                       f"{helper['name']} for {task['title']}", task_id, helper_id)
+        self._auto_due.pop(task_id, None)
+        return out
+
+    def offer_cards(self, task: dict) -> list[dict]:
+        """Who the requester can choose from: the neighbours the request pinged (from the
+        moment it is posted, "asked" until they reply) and everyone who has offered. Each
+        comes with their match, what connects them, and which one fits best."""
+        offers = {o["resident"]: o for o in self.store.offers(task["id"]) if o["status"] != "withdrawn"}
+        pinged = list(task.get("pinged") or [])
+        asked = [rid for rid in pinged if rid not in offers] if task["status"] == OPEN else []
+        ids = list(offers) + asked
+        if not ids:
+            return []
+        ranked = {c.resident_id: c for c in self._rank(
+            task, residents=[r for r in self.store.residents() if r["id"] in ids], limit=len(ids))}
+        cards = []
+        for rid in ids:
+            c = ranked.get(rid)
+            r = self._resident(rid)
+            o = offers.get(rid)
+            card = (c.to_dict() if c else {"resident_id": r["id"], "name": r["name"], "score": 0.0,
+                                           "reasons": ["outside the usual walking range"],
+                                           "ties": [], "familiar": False})
+            card.update(status=o["status"] if o else "asked", t=o["t"] if o else None,
+                        pinged=rid in pinged, reliability=r["reliability"])
+            # Someone you've never dealt with, and share nothing with yet, is a new face.
+            if not card.get("familiar") and not any("both" in tie for tie in card.get("ties") or []):
+                card["ties"] = ["New to you · meet a neighbour"] + (card.get("ties") or [])
+            cards.append(card)
+        # The best fit among everyone still in the running, whether or not they've replied.
+        live = [c for c in cards if c["status"] in ("offered", "asked")]
+        if live:
+            max(live, key=lambda c: c["score"])["recommended"] = True
+        order = {"chosen": 0, "offered": 1, "asked": 1, "declined": 2, "no_show": 3}
+        cards.sort(key=lambda c: (order.get(c["status"], 4), not c.get("recommended"), -c["score"]))
+        return cards
 
     def _dispatch(self, task: dict, provider: dict) -> dict:
         """Send the helper on their way: the job starts now."""
@@ -635,28 +873,19 @@ class SocialGrid:
             self._spawn(f"m:{task_id}", actor, "walk", home, (task["lon"], task["lat"]),
                         task_id=task_id, leg="go")
             verb = "is on the way for"
-        who = "SDP" if task["requester"] == "sdp" else self._resident(task["requester"])["name"]
+        who = self._resident(task["requester"])["name"]
         self.store.log(self.t, "accepted",
                        f"{provider['name']} accepted {task['title']} — {task['credits']} cr "
                        f"locked in escrow; {provider['name'].split()[0]} {verb} {who}",
                        task_id, actor)
         return self.store.task(task_id)
 
-    def complete(self, task_id: str, actor: str, proof: dict | None = None) -> dict:
-        """Confirm a job. Requesters confirm help; bounty takers submit geo-tagged proof."""
+    def complete(self, task_id: str, actor: str) -> dict:
+        """Confirm a job. The requester confirms help; rides confirm themselves by GPS."""
         task = self._task(task_id)
         if task["status"] not in (IN_PROGRESS, ARRIVED):
             raise GridError(f"{task_id} is {task['status'].replace('_', ' ')}")
-        if task["kind"] == "bounty":
-            if actor != task["provider"]:
-                raise GridError("only the resident doing the bounty can submit proof")
-            lon, lat = (proof["lon"], proof["lat"]) if proof else self.position_of(actor)
-            off = float(haversine_m(lon, lat, task["lon"], task["lat"]))
-            if off > PROOF_RADIUS_M:
-                raise GridError(f"proof photo is geo-tagged {off:.0f} m from the bounty; "
-                                f"it must be within {PROOF_RADIUS_M:.0f} m")
-            how = "geo-tagged proof accepted"
-        elif task["kind"] == "ride":
+        if task["kind"] == "ride":
             raise GridError("rides complete automatically when GPS shows you have both arrived")
         else:
             if actor not in (task["requester"], "system"):
@@ -678,12 +907,12 @@ class SocialGrid:
                                    reliability=round(min(0.99, provider["reliability"] + 0.01), 3))
         self.store.log(self.t, "completed",
                        f"{task['title']}: {how} — {paid} cr released to {provider['name']}",
-                       task["id"], provider["id"])
+                       task["id"], provider["id"],
+                       public=f"A neighbour helped with “{task['title']}” · {paid} cr")
         mover = self.movers.get(f"m:{task['id']}")
         if mover:
             mover.done = True
-        if task["kind"] != "bounty":
-            fraud.flag_circular(self.store, task["requester"], task["provider"], self.t)
+        fraud.flag_circular(self.store, task["requester"], task["provider"], self.t)
         self._close_bundle(task)
         return self.store.task(task["id"])
 
@@ -703,6 +932,9 @@ class SocialGrid:
         refunded = credits.refund(self.store, task, self.t, "cancelled by requester")
         self.store.update_task(task_id, status=CANCELLED, updated_t=self.t)
         self.movers.pop(f"m:{task_id}", None)
+        for o in self.store.offers(task_id):
+            if o["status"] == "offered":
+                self.store.set_offer(task_id, o["resident"], "declined", self.t)
         self.store.log(self.t, "cancelled", f"{task['title']} cancelled"
                        + (f" — {refunded} cr refunded" if refunded else ""), task_id, actor)
         return self.store.task(task_id)
@@ -723,6 +955,12 @@ class SocialGrid:
             return
         refunded = credits.refund(self.store, task, self.t, "provider no-show")
         self.store.update_task(task["id"], status=OPEN, provider=None, updated_t=self.t)
+        # The requester can choose again from the neighbours who offered before.
+        for o in self.store.offers(task["id"]):
+            if o["resident"] == mover.resident_id:
+                self.store.set_offer(task["id"], o["resident"], "no_show", self.t)
+            elif o["status"] == "declined":
+                self.store.set_offer(task["id"], o["resident"], "offered", self.t)
         self.store.log(self.t, "no_show",
                        f"GPS shows {self._resident(mover.resident_id)['name']} has not moved "
                        f"— {refunded} cr refunded, {task['title']} re-opened",
@@ -745,17 +983,242 @@ class SocialGrid:
         return {"tenant": tenant["name"], "credits": int(amount), "discount_rm": discount,
                 "balance": credits.balance(self.store, actor)}
 
-    def claim_rebate(self, tenant_id: str) -> dict:
+    def cash_out(self, tenant_id: str) -> dict:
         tenant = self.store.tenant(tenant_id)
         if tenant is None:
             raise GridError(f"unknown tenant {tenant_id}")
-        month = f"M{int(self.t // (30 * 86400)) + 1}"   # the cap is per rent month
-        result = credits.claim_rebate(self.store, tenant, month, self.t)
-        if result["credits"]:
-            self.store.log(self.t, "rebate", f"{tenant['name']} returned {result['credits']} cr "
-                           f"to SDP — RM{result['rebate_rm']:.2f} off rent "
-                           f"(cap RM{result['cap_rm']:.0f})")
+        result = credits.cash_out(self.store, tenant, self.t)
+        if not result["credits"]:
+            raise GridError(f"{tenant['name']} has no credits to cash out")
+        self.store.log(self.t, "cashout", f"{tenant['name']} cashed out {result['credits']} cr "
+                       f"with SDP — RM{result['rm']:.2f}")
         return result
+
+    # ------------------------------------------------------- community events
+
+    def _venue(self, lon: float, lat: float) -> tuple[float, float]:
+        """Where volunteers gather: the walkable point nearest the spot SDP picked, so a
+        park or the middle of a lake becomes the path at its edge, where GPS can check
+        people in."""
+        walk = self.networks.get("walk")
+        if walk is None:
+            return lon, lat
+        node = walk.nearest_node(np.array(self.town.frame.to_xy(lon, lat), dtype=float))
+        if node is None:
+            return lon, lat
+        vlon, vlat = (float(v) for v in self.town.frame.to_lonlat(*walk.node_xy[node]))
+        if haversine_m(lon, lat, vlon, vlat) > 250:
+            return lon, lat
+        return vlon, vlat
+
+    def create_event(self, *, title: str, place_name: str, lon: float, lat: float,
+                     start_at: float | None, duration_min: int, slots: int, credits_each: int,
+                     description: str = "") -> dict:
+        """SDP posts a community event. ``start_at`` None is a one-off job, open now."""
+        title = title.strip()
+        if len(title) < 3:
+            raise GridError("give the event a title")
+        if not 1 <= int(slots) <= MAX_EVENT_SLOTS:
+            raise GridError(f"an event takes 1-{MAX_EVENT_SLOTS} volunteers")
+        if not 1 <= int(credits_each) <= valuation.MAX_CREDITS:
+            raise GridError(f"an event pays 1-{valuation.MAX_CREDITS} credits per volunteer")
+        if not 10 <= int(duration_min) <= 8 * 60:
+            raise GridError("an event lasts between 10 minutes and 8 hours")
+        if start_at is not None:
+            start_at = float(start_at)
+            if start_at < self.now - 60:
+                raise GridError("that time has already passed")
+            if start_at - self.now > 4 * 7 * 86400:
+                raise GridError("events can be scheduled up to four weeks ahead")
+        vlon, vlat = self._venue(float(lon), float(lat))
+        event_id = self.store.next_event_id()
+        self.store.add_community_event(
+            id=event_id, title=title, description=description.strip(), place_name=place_name,
+            lon=vlon, lat=vlat, start_at=start_at, duration_min=int(duration_min),
+            slots=int(slots), credits=int(credits_each),
+            status=EVENT_LIVE if start_at is None else UPCOMING, created_t=self.t)
+        when = "any time" if start_at is None else self.when_label(start_at)
+        people = f"{slots} volunteer{'s' if slots != 1 else ''}"
+        self.store.log(self.t, "event", f"SDP posted {title} at {place_name or 'the township'} "
+                       f"({when}) — {people}, {credits_each} cr each", event_id,
+                       public=f"SDP is hosting “{title}” · {when} · {credits_each} cr per volunteer")
+        return self.store.community_event(event_id)
+
+    def _event(self, event_id: str) -> dict:
+        event = self.store.community_event(event_id)
+        if event is None:
+            raise GridError(f"unknown event {event_id}")
+        return event
+
+    def join_event(self, event_id: str, actor: str) -> dict:
+        event = self._event(event_id)
+        resident = self._resident(actor)
+        if event["status"] not in (UPCOMING, EVENT_LIVE):
+            raise GridError(f"{event['title']} is {event['status']}")
+        if resident["suspended"]:
+            raise GridError("this account is suspended pending review")
+        signups = self.store.signups(event_id)
+        if any(s["resident"] == actor for s in signups):
+            raise GridError("you've already joined this event")
+        if len(signups) >= event["slots"]:
+            raise GridError("every volunteer place is taken")
+        self.store.add_signup(event_id, actor, self.t)
+        self.store.log(self.t, "joined", f"{resident['name']} joined {event['title']} "
+                       f"({len(signups) + 1}/{event['slots']})", event_id, actor)
+        if event["status"] == EVENT_LIVE:
+            self._send_volunteer(event, actor)
+        return self.store.community_event(event_id)
+
+    def leave_event(self, event_id: str, actor: str) -> dict:
+        event = self._event(event_id)
+        mine = next((s for s in self.store.signups(event_id) if s["resident"] == actor), None)
+        if mine is None:
+            raise GridError("you haven't joined this event")
+        if mine["status"] != "joined":
+            raise GridError("you're already checked in; stay to the end to be paid")
+        self.store.remove_signup(event_id, actor)
+        self.movers.pop(f"e:{event_id}:{actor}", None)
+        self.store.log(self.t, "left", f"{self._resident(actor)['name']} left {event['title']}",
+                       event_id, actor)
+        return self.store.community_event(event_id)
+
+    def start_event(self, event_id: str) -> dict:
+        """Open the event now: everyone who joined sets off for the venue."""
+        event = self._event(event_id)
+        if event["status"] != UPCOMING:
+            raise GridError(f"{event['title']} is already {event['status']}")
+        if event["start_at"] is not None and event["start_at"] > self.now:
+            # Started early by SDP: it runs its full length from now.
+            self.store.update_community_event(event_id, start_at=self.now)
+        self.store.update_community_event(event_id, status=EVENT_LIVE)
+        event = self.store.community_event(event_id)
+        going = self.store.signups(event_id)
+        for s in going:
+            self._send_volunteer(event, s["resident"])
+        self.store.log(self.t, "event_live", f"{event['title']} has started — {len(going)} "
+                       f"volunteer{'s' if len(going) != 1 else ''} on the way", event_id,
+                       public=f"“{event['title']}” has started at {event['place_name'] or 'the venue'}")
+        return event
+
+    def end_event(self, event_id: str) -> dict:
+        """Close the event and pay every volunteer GPS checked in. No-shows are not paid."""
+        event = self._event(event_id)
+        if event["status"] not in (UPCOMING, EVENT_LIVE):
+            raise GridError(f"{event['title']} is already {event['status']}")
+        paid, missing = [], []
+        for s in self.store.signups(event_id):
+            if s["status"] == "checked_in":
+                credits.pay_volunteer(self.store, event, s["resident"], self.t)
+                self.store.update_signup(event_id, s["resident"], status="paid")
+                paid.append(s["resident"])
+            elif s["status"] == "joined":
+                self.store.update_signup(event_id, s["resident"], status="no_show")
+                missing.append(s["resident"])
+            self.movers.pop(f"e:{event_id}:{s['resident']}", None)
+        self.store.update_community_event(event_id, status=ENDED, ended_t=self.t)
+        names = ", ".join(self._resident(r)["name"].split()[0] for r in paid) or "nobody"
+        self.store.log(self.t, "event_paid",
+                       f"{event['title']} ended — {event['credits']} cr each to {names}"
+                       + (f"; {len(missing)} didn't turn up" if missing else ""), event_id,
+                       public=(f"{len(paid)} neighbour{'s' if len(paid) != 1 else ''} volunteered "
+                               f"at “{event['title']}” · {event['credits']} cr each")
+                       if paid else None)
+        return self.store.community_event(event_id)
+
+    def cancel_event(self, event_id: str) -> dict:
+        event = self._event(event_id)
+        if event["status"] not in (UPCOMING, EVENT_LIVE):
+            raise GridError(f"{event['title']} is already {event['status']}")
+        signups = self.store.signups(event_id)
+        if any(s["status"] == "checked_in" for s in signups):
+            raise GridError("volunteers are already checked in; end the event to pay them")
+        for s in signups:
+            self.movers.pop(f"e:{event_id}:{s['resident']}", None)
+        self.store.update_community_event(event_id, status=EVENT_CANCELLED, ended_t=self.t)
+        self.store.log(self.t, "cancelled", f"SDP cancelled {event['title']}", event_id)
+        return self.store.community_event(event_id)
+
+    def _send_volunteer(self, event: dict, resident_id: str) -> None:
+        """Walk a volunteer from wherever they are to the venue; arriving checks them in."""
+        key = f"e:{event['id']}:{resident_id}"
+        if key in self.movers:
+            return
+        start = self.position_of(resident_id)
+        # An errand is dropped for the event.
+        for m in list(self.movers.values()):
+            if m.resident_id == resident_id and m.leg == "ambient":
+                self.movers.pop(m.id, None)
+        self._spawn(key, resident_id, "walk", start, (event["lon"], event["lat"]),
+                    leg="event", event_id=event["id"])
+
+    def _check_in(self, mover: Mover) -> None:
+        event = self.store.community_event(mover.event_id)
+        if event is None or event["status"] != EVENT_LIVE:
+            return
+        here = mover.position()
+        if haversine_m(here[0], here[1], event["lon"], event["lat"]) > EVENT_CHECKIN_M:
+            return
+        signup = next((s for s in self.store.signups(event["id"])
+                       if s["resident"] == mover.resident_id), None)
+        if signup is None or signup["status"] != "joined":
+            return
+        self.store.update_signup(event["id"], mover.resident_id, status="checked_in",
+                                 checked_in_t=self.t)
+        self.store.log(self.t, "checked_in", f"{self._resident(mover.resident_id)['name']} "
+                       f"checked in at {event['title']} (GPS)", event["id"], mover.resident_id)
+        # A one-off job is done the moment its volunteers are there.
+        if event["start_at"] is None:
+            signups = self.store.signups(event["id"])
+            if len(signups) >= event["slots"] and all(s["status"] == "checked_in" for s in signups):
+                self.end_event(event["id"])
+
+    def _run_events(self) -> None:
+        """Start events when the clock reaches them; end and pay when they are over."""
+        for event in self.store.community_events([UPCOMING, EVENT_LIVE]):
+            if event["start_at"] is None:
+                continue
+            if event["status"] == UPCOMING and event["start_at"] <= self.now:
+                self.start_event(event["id"])
+            elif (event["status"] == EVENT_LIVE
+                  and self.now >= event["start_at"] + event["duration_min"] * 60):
+                self.end_event(event["id"])
+
+    def _auto_join(self) -> None:
+        """Demo mode: a neighbour signs up for an SDP event by themselves."""
+        if not self.auto_accept or self.t < self._next_auto_join:
+            return
+        self._next_auto_join = self.t + AUTO_JOIN_EVERY_S * (0.6 + 0.8 * self.rng.random())
+        busy = {m.resident_id for m in self.movers.values() if not m.done and m.leg != "ambient"}
+        for event in self.store.community_events([UPCOMING, EVENT_LIVE]):
+            signups = self.store.signups(event["id"])
+            if len(signups) >= event["slots"] - 1:
+                continue
+            taken = {s["resident"] for s in signups}
+            pool = [r for r in self.store.residents()
+                    if r["id"] not in taken | busy and r["id"] not in PERSONAS
+                    and not r["suspended"]]
+            if pool:
+                self.join_event(event["id"], self.rng.choice(pool)["id"])
+                return
+
+    def event_view(self, event: dict) -> dict:
+        signups = self.store.signups(event["id"])
+        names = {r["id"]: r["name"] for r in self.store.residents()}
+        return {
+            "id": event["id"], "title": event["title"], "description": event["description"],
+            "place_name": event["place_name"], "lon": event["lon"], "lat": event["lat"],
+            "start_at": event["start_at"],
+            "when": "Any time" if event["start_at"] is None else self.when_label(event["start_at"]),
+            "ends_at": (None if event["start_at"] is None
+                        else event["start_at"] + event["duration_min"] * 60),
+            "duration_min": event["duration_min"], "slots": event["slots"],
+            "credits": event["credits"], "status": event["status"],
+            "joined": len(signups),
+            "checked_in": sum(1 for s in signups if s["status"] in ("checked_in", "paid")),
+            "signups": [{"resident": s["resident"], "name": names.get(s["resident"], s["resident"]),
+                         "status": s["status"]} for s in signups],
+            "created_t": event["created_t"], "ended_t": event["ended_t"],
+        }
 
     # ----------------------------------------------------------------- tick
 
@@ -767,10 +1230,18 @@ class SocialGrid:
         self._auto_confirm()
         self._auto_accept_due()
         self._start_bookings()
+        self._expire_offers()
+        self._run_events()
+        self._auto_join()
         self._ambient()
         self.store.set_meta("clock", f"{self.t:.1f}")
 
     def _advance(self, mover: Mover, dt: float) -> None:
+        if mover.done and mover.leg == "event":
+            # Checked-in volunteers stay at the venue until the event ends and pays them.
+            event = self.store.community_event(mover.event_id)
+            if event is not None and event["status"] == EVENT_LIVE:
+                return
         if mover.done:
             if mover.linger_until is not None and self.t >= mover.linger_until:
                 self.movers.pop(mover.id, None)
@@ -788,6 +1259,10 @@ class SocialGrid:
         # -- arrival -------------------------------------------------------
         if mover.leg == "ambient":
             mover.done = True
+            return
+        if mover.leg == "event":
+            mover.done = True
+            self._check_in(mover)
             return
         task = self.store.task(mover.task_id) if mover.task_id else None
         if task is None or task["status"] not in LIVE:
@@ -828,13 +1303,11 @@ class SocialGrid:
             if task is None or task["status"] != ARRIVED:
                 self._arrived_at.pop(task_id, None)
                 continue
-            due = (task["kind"] == "bounty"   # the phone uploads its geo-tagged photo
-                   or self.t - since >= task["est_minutes"] * 60 * AUTO_CONFIRM_FACTOR)
-            if not due:
+            if self.t - since < task["est_minutes"] * 60 * AUTO_CONFIRM_FACTOR:
                 continue
             self._arrived_at.pop(task_id, None)
             try:
-                self.complete(task_id, task["provider"] if task["kind"] == "bounty" else "system")
+                self.complete(task_id, "system")
             except GridError as err:
                 self.store.log(self.t, "warning", f"{task['title']}: {err}", task_id)
 
@@ -844,7 +1317,7 @@ class SocialGrid:
         if not self.auto_accept:
             return
         for task in self.store.tasks([OPEN]):
-            if task["kind"] not in ("bounty", "bundle") and task["created_t"] > 0:
+            if task["kind"] != "bundle" and task["created_t"] > 0:
                 self._auto_due.setdefault(task["id"], self.t + AUTO_ACCEPT_S)
 
     def _auto_accept_due(self) -> None:
@@ -858,6 +1331,9 @@ class SocialGrid:
             task = self.store.task(task_id)
             if task is None or task["status"] != OPEN:
                 continue
+            if self.uses_offers(task):
+                self._auto_offer(task)
+                continue
             if task.get("invitee"):
                 order = [task["invitee"]]
             else:
@@ -870,6 +1346,38 @@ class SocialGrid:
                     break
                 except GridError:
                     continue
+
+    def _auto_offer(self, task: dict) -> None:
+        """Demo mode: the pinged neighbours offer, one every few seconds; the presenter chooses."""
+        offers = self.store.offers(task["id"])
+        if len(offers) >= AUTO_OFFERS:
+            return
+        taken = {o["resident"] for o in offers}
+        busy = {t["provider"] for t in self.store.tasks([RESERVED, IN_PROGRESS, ARRIVED])
+                if t["provider"]}
+        order = list(task.get("pinged") or []) + [c.resident_id for c in self._rank(task)]
+        for resident_id in order:
+            if resident_id in taken or resident_id in busy or resident_id == task["requester"]:
+                continue
+            try:
+                self.offer(task["id"], resident_id)
+            except GridError:
+                continue
+            if len(offers) + 1 < AUTO_OFFERS:
+                self._auto_due[task["id"]] = self.t + AUTO_OFFER_S
+            return
+
+    def _expire_offers(self) -> None:
+        """A help request whose time came and went with nobody chosen closes; nothing was held."""
+        for task in self.store.tasks([OPEN]):
+            if (self.uses_offers(task) and task.get("start_at") is not None
+                    and self.now > task["start_at"] + EXPIRE_AFTER_S):
+                self.store.update_task(task["id"], status=CANCELLED, updated_t=self.t)
+                for o in self.store.offers(task["id"]):
+                    if o["status"] == "offered":
+                        self.store.set_offer(task["id"], o["resident"], "declined", self.t)
+                self.store.log(self.t, "expired", f"{task['title']} expired — nobody was chosen "
+                               "in time; no credits were held", task["id"], task["requester"])
 
     def _start_bookings(self) -> None:
         """A confirmed booking starts by itself when the clock reaches its slot."""
@@ -908,7 +1416,7 @@ class SocialGrid:
     # ------------------------------------------------------------- snapshot
 
     def task_view(self, task: dict) -> dict:
-        requester = None if task["requester"] == "sdp" else self.store.resident(task["requester"])
+        requester = self.store.resident(task["requester"])
         provider = self.store.resident(task["provider"]) if task.get("provider") else None
         return {
             "id": task["id"], "title": task["title"], "kind": task["kind"],
@@ -920,10 +1428,14 @@ class SocialGrid:
             "dest_id": task["dest_id"], "dest_name": task["dest_name"],
             "dest_lon": task["dest_lon"], "dest_lat": task["dest_lat"],
             "requester": task["requester"],
-            "requester_name": requester["name"] if requester else "SDP Property Management",
+            "requester_name": requester["name"] if requester else task["requester"],
             "provider": task.get("provider"),
             "provider_name": provider["name"] if provider else None,
             "parent_id": task.get("parent_id"), "source": task["source"],
+            "pinged": task.get("pinged") or [],
+            "offers_mode": self.uses_offers(task),
+            "offers": [{"resident": o["resident"], "status": o["status"]}
+                       for o in self.store.offers(task["id"]) if o["status"] != "withdrawn"],
             "valuation": task["valuation"], "created_t": task["created_t"],
             "updated_t": task["updated_t"], "description": task["description"],
         }
@@ -952,6 +1464,11 @@ class SocialGrid:
             "movers": movers,
             "tasks": tasks,
             "events": self.store.events(limit=30),
+            # SDP events still to come or running, and those that closed in the last half hour.
+            "community": [self.event_view(e) for e in self.store.community_events(
+                [UPCOMING, EVENT_LIVE, ENDED]) if e["status"] != ENDED
+                or (e["ended_t"] or 0) >= self.t - 1800.0],
+            "highlights": self.store.highlights(15),
             "demo": {"auto_accept": self.auto_accept},
             "stats": {
                 "open": sum(1 for t in live if t["status"] == OPEN),
@@ -960,6 +1477,10 @@ class SocialGrid:
                     "SELECT COUNT(*) AS n FROM tasks WHERE status = 'completed' "
                     "AND kind != 'bundle'").fetchone()["n"]),
                 "circulating": credits.circulating(self.store),
+                "week_favours": int(self.store.execute(
+                    "SELECT COUNT(*) AS n FROM tasks WHERE status = 'completed' "
+                    "AND kind != 'bundle' AND updated_t >= ?",
+                    (self.t - 7 * 86400,)).fetchone()["n"]),
                 "residents": len(names),
                 "moving": sum(1 for m in movers if not m["done"]),
             },

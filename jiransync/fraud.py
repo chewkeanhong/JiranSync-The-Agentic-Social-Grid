@@ -3,7 +3,7 @@
 Two abuses the pitch names, two checks:
 
 * **Circular trading.** Two accounts passing the same credits back and forth to farm
-  completions (and, with them, reputation or bounty eligibility). Flagged when a pair
+  completions (and, with them, reputation). Flagged when a pair
   has paid each other repeatedly in both directions inside a short window.
 * **Ghosting.** A provider accepts, then never moves. The escrow is refunded and the
   provider takes a reliability strike; three strikes suspends the account.
@@ -29,7 +29,7 @@ def circular_pair(store: Store, a: str, b: str, now: float) -> bool:
     rows = store.execute(
         "SELECT l.credit AS provider, t.requester AS requester FROM ledger l "
         "JOIN tasks t ON t.id = l.task_id "
-        "WHERE l.kind = 'release' AND l.t >= ? AND t.kind != 'bounty' "
+        "WHERE l.kind = 'release' AND l.t >= ? "
         "AND ((l.credit = ? AND t.requester = ?) OR (l.credit = ? AND t.requester = ?))",
         (now - CIRCULAR_WINDOW_S, a, b, b, a)).fetchall()
     a_paid_b = sum(1 for r in rows if r["requester"] == a)

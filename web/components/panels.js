@@ -1,10 +1,11 @@
 /* Panels: everything around the map.
  *
  *   header      logo, search, place, notifications, you + your credits
- *   rail        the app's sections
- *   left panel  Ask JiranSync + nearby requests / your tasks / community
- *   right panel your Jiran Credits, rewards near you, your recent activity
- *   map chrome  category filter, legend, map tools, developer bar (hidden by default)
+ *   rail        the app's sections: a resident's, or SDP admin's
+ *   left panel  resident: Ask JiranSync + nearby requests / your tasks / community
+ *               admin:    live requests / merchants / SDP events / the economy
+ *   right panel your Jiran Credits, rewards near you, your recent activity (residents)
+ *   map chrome  category filter, legend, map tools, developer bar (admin only)
  *
  * Lists re-render only when their content signature changes, so a button is never
  * replaced under the pointer by the 4 Hz snapshot.
@@ -25,8 +26,15 @@ const RAIL = [
   {id: 'home', icon: 'home', label: 'Home'},
   {id: 'create', icon: 'plus', label: 'Ask'},
   {id: 'mine', icon: 'list', label: 'My tasks'},
-  {id: 'community', icon: 'users', label: 'Community'},
+  {id: 'community', icon: 'flag', label: 'Community'},
   {id: 'credits', icon: 'coin', label: 'Credits'},
+];
+
+const ADMIN_RAIL = [
+  {id: 'live', icon: 'sparkle', label: 'Live'},
+  {id: 'merchants', icon: 'store', label: 'Merchants'},
+  {id: 'events', icon: 'flag', label: 'Events'},
+  {id: 'economy', icon: 'coin', label: 'Economy'},
   {id: 'spatial', icon: 'layers', label: '3D Demo'},
 ];
 
@@ -34,34 +42,36 @@ const ASK_CHIPS = [
   {cat: 'ride', label: 'Ride', text: 'Need a ride to the MRT tomorrow 8am'},
   {cat: 'help', label: 'Help', text: 'Need someone to fix my leaking tap and help carry a new cabinet upstairs tonight'},
   {cat: 'tutoring', label: 'Learn', text: 'Can someone tutor my son in SPM maths on Saturday 10am?'},
-  {cat: 'community', label: 'Garden', text: 'Water my garden and plants while I am away this weekend'},
+  {cat: 'community', label: 'Babysit', text: 'Look after my baby for an hour tomorrow evening'},
 ];
 
 function renderShell() {
   // Rail
-  $('rail').innerHTML = RAIL.map((r) =>
+  $('rail').innerHTML = (jiran.admin ? ADMIN_RAIL : RAIL).map((r) =>
     `<button class="rail-btn" data-rail="${r.id}" title="${r.label}">${icon(r.icon, 20)}<span>${r.label}</span></button>`).join('') +
     `<span class="rail-fill"></span>` +
-    `<button class="rail-btn" data-rail="dev" title="Developer mode">${icon('settings', 18)}<span>Dev</span></button>`;
+    (jiran.admin ? `<button class="rail-btn" data-rail="dev" title="Developer mode">${icon('settings', 18)}<span>Dev</span></button>` : '');
   for (const b of $('rail').querySelectorAll('[data-rail]')) b.onclick = () => railGo(b.dataset.rail);
 
   // Category filter
   renderCats();
 
-  // Legend
+  // Legend: SDP reads people by status; a resident sees neighbours only as dots.
   $('legend').innerHTML =
     Object.values(CATEGORIES).map((c) =>
       `<span class="lg" style="--c:${c.color}"><i>${icon(c.icon, 13)}</i>${c.short}</span>`).join('') +
     `<span class="lg-sep"></span>` +
-    Object.values(STATUSES).map((s) =>
-      `<span class="lg lg-dot" style="--c:${s.color}"><b></b>${s.label}</span>`).join('');
+    (jiran.admin
+      ? Object.values(STATUSES).map((s) =>
+        `<span class="lg lg-dot" style="--c:${s.color}"><b></b>${s.label}</span>`).join('')
+      : `<span class="lg" style="--c:${CATEGORIES.community.color}"><i>${icon('flag', 13)}</i>SDP event</span>`);
 
   // Map tools
   $('btn-view-reset').innerHTML = icon('compass', 18);
   $('btn-locate').innerHTML = icon('locate', 18);
   $('btn-zoom-in').innerHTML = icon('plus', 18);
   $('btn-zoom-out').innerHTML = icon('minus', 18);
-  $('btn-locate').onclick = () => { if (myHome()) openResident(jiran.me, true); };
+  $('btn-locate').onclick = () => { if (myHome()) openResident(jiran.me, true); else resetCamera(); };
   $('btn-zoom-in').onclick = () => zoomBy(0.8);
   $('btn-zoom-out').onclick = () => zoomBy(-0.8);
 
@@ -77,6 +87,9 @@ function renderShell() {
   $('right-toggle').onclick = () => setRight(!jiran.rightOpen);
   $('right-close').innerHTML = icon('x', 16);
   $('right-close').onclick = () => setRight(false);
+  railActive();
+  if (renderShell.wired) return;
+  renderShell.wired = true;
   wireSearch();
   wireClock();
   wireLayers();
@@ -87,9 +100,10 @@ function renderShell() {
     if (!e.target.closest('.search')) $('search-results').hidden = true;
   });
 
-  setRight(window.innerWidth >= 1440);
-  window.addEventListener('resize', () => { if (window.innerWidth >= 1440 && !jiran.rightOpen) setRight(true); });
-  railActive();
+  setRight(!jiran.admin && window.innerWidth >= 1440);
+  window.addEventListener('resize', () => {
+    if (!jiran.admin && window.innerWidth >= 1440 && !jiran.rightOpen) setRight(true);
+  });
 }
 
 function zoomBy(dz) {
@@ -108,13 +122,25 @@ function setRight(open) {
 
 function railGo(id) {
   if (id === 'dev') { setDev(!jiran.dev); toast(jiran.dev ? 'Developer mode on' : 'Developer mode off'); return; }
-  if (id === 'credits') { setRight(!jiran.rightOpen || window.innerWidth >= 1440); $('right').scrollTop = 0; return; }
+  if (id === 'credits') { showWallet(); return; }
   if (id !== 'spatial' && jiran.view === 'spatial') spatialExit();
   if (id === 'create') { jiran.view = 'home'; renderLeft(true); setTimeout(() => $('ask-text')?.focus(), 50); railActive('create'); return; }
   jiran.view = id;
   renderLeft(true);
   railActive();
   if (id === 'spatial') spatialEnter();
+}
+
+/* Credits is the right-hand panel, not a page: open it if it is closed, bring the wallet
+ * to the top, and light it up so the click visibly lands even when it was already open. */
+function showWallet() {
+  setRight(true);
+  $('right').scrollTo({top: 0, behavior: 'smooth'});
+  const card = $('wallet').querySelector('.wallet-card');
+  if (card) { card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash'); }
+  railActive('credits');
+  clearTimeout(showWallet.timer);
+  showWallet.timer = setTimeout(() => railActive(), 1600);
 }
 
 function railActive(force) {
@@ -129,7 +155,20 @@ function renderCats() {
   $('cats').innerHTML = `<button class="cat ${all ? 'on' : ''}" data-cat="all">${icon('layers', 15)}<span>All</span></button>` +
     Object.entries(CATEGORIES).map(([k, c]) =>
       `<button class="cat ${jiran.filter.has(k) && !all ? 'on' : ''}" data-cat="${k}" style="--c:${c.color}">` +
-      `<i>${icon(c.icon, 15)}</i><span>${c.short}</span></button>`).join('');
+      `<i>${icon(c.icon, 15)}</i><span>${c.short}</span></button>`).join('') +
+    // SDP can take the people off the map and look at the requests on their own.
+    (jiran.admin ? `<span class="cat-sep"></span><button class="cat people ${mapLayers.residents ? 'on' : ''}" data-people
+      aria-pressed="${mapLayers.residents}" title="Show or hide residents on the map">${icon('users', 15)}<span>Residents</span></button>` : '');
+  const people = $('cats').querySelector('[data-people]');
+  if (people) {
+    people.onclick = () => {
+      mapLayers.residents = !mapLayers.residents;
+      renderCats();
+      syncMarkers();
+      redraw();
+      toast(mapLayers.residents ? 'Residents shown on the map' : 'Residents hidden — requests, events and shops only');
+    };
+  }
   for (const b of $('cats').querySelectorAll('[data-cat]')) {
     b.onclick = () => {
       const k = b.dataset.cat;
@@ -150,6 +189,16 @@ function renderCats() {
 
 let shownBalance = null;
 function renderHeaderMe() {
+  if (jiran.admin) {
+    $('me-avatar').innerHTML = `<span class="av sdp-av" style="width:38px;height:38px">${icon('shield', 19)}</span>`;
+    $('me-name').textContent = 'SDP Admin';
+    const sub = $('me-credits');
+    delete sub.dataset.value;
+    sub.classList.add('admin-sub');
+    sub.textContent = 'Township operations';
+    return;
+  }
+  $('me-credits').classList.remove('admin-sub');
   const m = jiran.meData;
   if (!m) return;
   $('me-avatar').innerHTML = avatarHtml(m.id, {size: 38, status: personState(m.id)?.status, verified: m.verified});
@@ -180,18 +229,23 @@ function toggleMeMenu() {
   if (!menu.hidden) { menu.hidden = true; return; }
   menu.innerHTML = `
     <div class="mm-head">Demo: view JiranSync as</div>
+    <button class="mm-row mm-admin ${jiran.admin ? 'on' : ''}" data-who="${ADMIN_ID}">
+      <span class="av sdp-av" style="width:28px;height:28px">${icon('shield', 15)}</span>
+      <span><b>SDP Admin</b><em>Township operations · events · merchants</em></span></button>
+    <div class="mm-sub">Residents</div>
     <div class="mm-list">${jiran.residents.map((r) => `
-      <button class="mm-row ${r.id === jiran.me ? 'on' : ''}" data-who="${r.id}">
+      <button class="mm-row ${!jiran.admin && r.id === jiran.me ? 'on' : ''}" data-who="${r.id}">
         ${avatarHtml(r.id, {size: 28})}<span><b>${esc(r.name)}</b>
         <em>${r.id === 'R001' ? 'Needs a ride to the MRT' : r.id === 'R002' ? 'Drives to the MRT' :
           esc((r.skills || []).slice(0, 2).join(', '))}</em></span>
         <span class="mm-cr">${r.balance}</span></button>`).join('')}</div>
-    <button class="mm-row mm-dev" data-dev="1">${icon('settings', 16)}<span><b>Developer mode</b><em>${jiran.dev ? 'On' : 'Off'} — engine, sockets, SDP console</em></span></button>`;
+    ${jiran.admin ? `<button class="mm-row mm-dev" data-dev="1">${icon('settings', 16)}<span><b>Developer mode</b><em>${jiran.dev ? 'On' : 'Off'} — AI engine, connection, no-show button</em></span></button>` : ''}`;
   menu.hidden = false;
   for (const b of menu.querySelectorAll('[data-who]')) {
     b.onclick = () => { menu.hidden = true; signIn(b.dataset.who); };
   }
-  menu.querySelector('[data-dev]').onclick = () => { menu.hidden = true; railGo('dev'); };
+  const dev = menu.querySelector('[data-dev]');
+  if (dev) dev.onclick = () => { menu.hidden = true; railGo('dev'); };
   menu.querySelector('.mm-row.on')?.scrollIntoView({block: 'center'});
 }
 
@@ -207,11 +261,18 @@ function renderDevBar() {
 /* ----------------------------------------------------------- notifications */
 
 function myEvents() {
+  if (jiran.admin) return state?.events || [];
   const mine = new Set((jiran.meData?.tasks || []).map((t) => t.id));
+  for (const e of communityEvents()) if (myEventSignup(e)) mine.add(e.id);
   return (state?.events || []).filter((e) => e.actor === jiran.me || (e.task_id && mine.has(e.task_id)));
 }
 
-function seenKey() { return `jiransync.seen.${jiran.me}`; }
+function seenKey() { return `jiransync.seen.${jiran.admin ? ADMIN_ID : jiran.me}`; }
+
+/** A feed row points at a request (T…) or an SDP event (E…). */
+function openFeedItem(id) {
+  if (eventById(id)) openEvent(id, true); else openTask(id, true);
+}
 
 function renderBell() {
   const seen = Number(storageGet(seenKey()) || 0);
@@ -228,7 +289,7 @@ function toggleNotifs() {
     ? events.slice(0, 12).map((e) => eventRow(e)).join('')
     : `<div class="empty-state small">${icon('bell', 26)}<b>All caught up</b><span>Updates about your requests and jobs appear here.</span></div>`);
   box.hidden = false;
-  for (const row of box.querySelectorAll('[data-task]')) row.onclick = () => { box.hidden = true; openTask(row.dataset.task, true); };
+  for (const row of box.querySelectorAll('[data-task]')) row.onclick = () => { box.hidden = true; openFeedItem(row.dataset.task); };
   if (events[0]) storageSet(seenKey(), String(events[0].id));
   renderBell();
 }
@@ -242,14 +303,21 @@ function wireSearch() {
     const q = input.value.trim().toLowerCase();
     if (q.length < 2) { box.hidden = true; return; }
     const results = [];
+    for (const e of communityEvents()) {
+      if (`${e.title} ${e.place_name} sdp event`.toLowerCase().includes(q)) {
+        results.push({html: `<span class="sr-ic" style="--c:${CATEGORIES.community.color}">${icon('flag', 15)}</span><span><b>${esc(e.title)}</b><em>SDP event · ${esc(e.when)}</em></span>`,
+                      go: () => openEvent(e.id, true)});
+      }
+    }
     for (const t of liveTasks()) {
+      if (!visibleTask(t)) continue;
       if (t.title.toLowerCase().includes(q) || (t.skills || []).some((s) => s.includes(q))) {
         const c = CATEGORIES[catOf(t)];
         results.push({html: `<span class="sr-ic" style="--c:${c.color}">${icon(c.icon, 15)}</span><span><b>${esc(t.title)}</b><em>${credits(t.credits)} · ${esc(whenOf(t))}</em></span>`,
                       go: () => openTask(t.id, true)});
       }
     }
-    for (const r of jiran.residents) {
+    for (const r of jiran.admin ? jiran.residents : []) {
       if (r.name.toLowerCase().includes(q) || (r.skills || []).some((s) => s.includes(q))) {
         results.push({html: `${avatarHtml(r.id, {size: 28})}<span><b>${esc(r.name)}</b><em>${esc((r.skills || []).slice(0, 3).join(', '))}</em></span>`,
                       go: () => openResident(r.id, true)});
@@ -276,7 +344,7 @@ function wireSearch() {
     }
     box.innerHTML = results.length
       ? results.slice(0, 9).map((r, i) => `<button class="sr" data-i="${i}">${r.html}</button>`).join('')
-      : `<div class="empty-state small">${icon('search', 22)}<b>No matches</b><span>Try a skill like “plumbing”, a name, or “MRT”.</span></div>`;
+      : `<div class="empty-state small">${icon('search', 22)}<b>No matches</b><span>Try a skill like “plumbing”, “clean-up”, or “MRT”.</span></div>`;
     box.hidden = false;
     box._results = results;
     for (const b of box.querySelectorAll('[data-i]')) {
@@ -312,9 +380,9 @@ function renderAsk() {
     b.onclick = () => { $('ask-text').value = ASK_CHIPS[Number(b.dataset.q)].text; $('ask-text').focus(); };
   }
   // Typing your own request asks the whole grid, not the neighbour a card picked.
-  $('ask-go').onclick = () => { jiran.target = null; jiran.dest = null; askGrid(); };
+  $('ask-go').onclick = () => { jiran.target = null; jiran.dest = null; jiran.draftOpts = {}; askGrid(); };
   $('ask-text').addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); jiran.target = null; jiran.dest = null; askGrid(); }
+    if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); jiran.target = null; jiran.dest = null; jiran.draftOpts = {}; askGrid(); }
   });
   renderDraft();
 }
@@ -333,7 +401,7 @@ const LAYER_ROWS = [
 function renderLayersMenu() {
   const dd = $('layers-dd');
   dd.innerHTML = `<h4>Map layers</h4>
-    ${LAYER_ROWS.map(([key, ic, label, sub]) => `
+    ${LAYER_ROWS.filter(([key]) => key !== 'residents' || jiran.admin).map(([key, ic, label, sub]) => `
       <label class="lyr"><span class="lyr-ic">${icon(ic, 15)}</span><span><b>${label}</b><em>${sub}</em></span>
         <input type="checkbox" data-layer="${key}" ${mapLayers[key] ? 'checked' : ''}><i class="sw"></i></label>`).join('')}
     <p>Tasks, shops and transit: use the filter bar above the map.</p>`;
@@ -432,6 +500,7 @@ function wireClock() {
 function askFor(text, target = null, dest = null) {
   jiran.target = target;
   jiran.dest = dest;
+  jiran.draftOpts = {};
   closeInspector();
   jiran.view = 'home';
   renderLeft(true);
@@ -440,21 +509,21 @@ function askFor(text, target = null, dest = null) {
   askGrid();
 }
 
-async function askGrid() {
+async function askGrid(quiet = false) {
   const text = $('ask-text').value.trim();
   if (text.length < 3) { toast('Tell the grid what you need first', false); $('ask-text').focus(); return; }
-  jiran.drafting = true;
-  jiran.draft = null;
-  renderDraft();
+  jiran.drafting = !quiet;
+  if (!quiet) { jiran.draft = null; renderDraft(); }
   const button = $('ask-go');
   button.disabled = true;
   button.innerHTML = `<span class="spinner"></span>Finding neighbours…`;
   try {
     const target = jiran.target ? {invitee: jiran.target.id, start_at: jiran.target.start_at ?? null} : {};
     if (jiran.dest) target.dest = {lon: jiran.dest.lon, lat: jiran.dest.lat, name: jiran.dest.name};
-    jiran.draft = await api('/api/tasks/draft', {actor: jiran.me, text, ...target});
+    jiran.draft = await api('/api/tasks/draft', {actor: jiran.me, text, ...target, ...(jiran.draftOpts || {})});
     syncMarkers();
     jiran.draftCredits = jiran.draft.valuation.suggested;
+    if (quiet) return;
     closeInspector();
     const home = myHome();
     const pts = (jiran.draft.subtasks?.length ? jiran.draft.subtasks.flatMap((s) => s.candidates)
@@ -477,7 +546,8 @@ async function askGrid() {
 function candidateRow(c, rank) {
   return `<button class="cand" data-res="${c.resident_id}">
       ${avatarHtml(c.resident_id, {size: 34, status: personState(c.resident_id)?.status, verified: true})}
-      <span class="cand-main"><b>${esc(c.name)}</b><em>${esc(c.reasons.slice(0, 3).join(' · '))}</em></span>
+      <span class="cand-main"><b>${esc(c.name)}</b><em>${esc(c.reasons.slice(0, 3).join(' · '))}</em>
+        ${c.ties?.length ? `<span class="ties">${tieTags(c.ties)}</span>` : ''}</span>
       <span class="cand-score"><i style="--w:${Math.round(Math.min(1, c.score) * 100)}%"></i>${rank === 0 ? '<em>Best match</em>' : ''}</span>
     </button>`;
 }
@@ -490,6 +560,11 @@ function draftInsights(d) {
     if (heading.length) notes.push(`<b>${heading.length} neighbour${heading.length > 1 ? 's are' : ' is'} heading to ${esc(d.task.dest_name)}</b>${u.slot ? ` in the ${u.slot}` : ''}.`);
   } else if (d.subtasks?.length > 1) {
     notes.push(`Split into <b>${d.subtasks.length} smaller jobs</b> so each goes to the right neighbour.`);
+  }
+  // "Help me" alone: the grid can't tell who to ask. Say so, kindly.
+  const words = ($('ask-text')?.value || '').trim().split(/\s+/).length;
+  if (u.kind === 'help' && (u.skills || []).join() === 'errands' && words <= 4) {
+    notes.push('<b>Say what the help is</b> — “carry a cabinet”, “fix a tap”, “babysit” — so JiranSync pings neighbours with the right skill.');
   }
   if (!d.subtasks?.length && d.candidates[0]) {
     notes.push(`<b>${esc(d.candidates[0].name.split(' ')[0])}</b> is the closest suitable match.`);
@@ -524,6 +599,7 @@ function renderDraft() {
   const cost = split ? d.cost : jiran.draftCredits;
   const short = cost > d.available;
   const v = d.valuation;
+  const asksWhen = u.kind === 'help' && !d.invitee && !split;
   const body = split ? d.subtasks.map((s) => {
     const sc = CATEGORIES[catOf({kind: 'help', skills: s.skills})];
     return `<div class="sub">
@@ -532,6 +608,7 @@ function renderDraft() {
         : (s.candidates[0] ? candidateRow(s.candidates[0], 0) : '<p class="muted">Nobody nearby has this skill yet.</p>')}
     </div>`;
   }).join('') : `
+      ${asksWhen ? draftFields(d) : ''}
       <div class="reward-box">
         <div class="rb-top"><div><span class="rb-label">${icon('sparkle', 13)}AI suggested reward</span>
           <b class="rb-value"><span id="d-credits">${jiran.draftCredits}</span> Credits</b>
@@ -547,21 +624,22 @@ function renderDraft() {
         ? `For <b>${esc(dayTimeLabel(d.invitee.start_at))}</b>. They confirm, your credits are held, and the job starts at that time.`
         : 'They’re free right now. Nobody else will be pinged.'}</p>` : `
       <div class="sec-title">Neighbours we’ll ping</div>
-      <div class="cands">${d.candidates.slice(0, 4).map((c, i) => candidateRow(c, i)).join('')
-        || '<p class="muted">Nobody in walking range matches yet.</p>'}</div>`}
+      <div class="cands">${d.candidates.slice(0, 3).map((c, i) => candidateRow(c, i)).join('')
+        || '<p class="muted">Nobody in walking range matches yet.</p>'}</div>
+      ${u.kind === 'help' ? `<p class="muted">They — or anyone nearby — offer to help, and <b>you choose who comes</b>. Nothing is paid until you choose.</p>` : ''}`}
       ${d.fallback ? `<div class="fallback">${icon('store', 15)}<div><b>${esc(d.fallback.name)}</b> can do this — residents get ${d.fallback.discount_pct}% off.</div></div>` : ''}`;
   el.hidden = false;
   el.innerHTML = `
     <div class="draft-card" style="--c:${cat.color}">
       <div class="dc-head"><span class="sr-ic" style="--c:${cat.color}">${icon(cat.icon, 17)}</span>
         <div><b>${esc(u.title)}</b><em>${esc(cat.label)}${d.invitee ? ` · ${esc(d.invitee.start_at != null ? dayTimeLabel(d.invitee.start_at) : 'Now')}`
-          : u.when ? ` · ${esc(u.when)}` : ''}${u.kind === 'ride' && d.task.dest_name ? ` · to ${esc(d.task.dest_name)}` : ''}</em></div>
+          : d.task.start_at != null ? ` · ${esc(dayTimeLabel(d.task.start_at))}` : u.when ? ` · ${esc(u.when)}` : ''}${u.kind === 'ride' && d.task.dest_name ? ` · to ${esc(d.task.dest_name)}` : ''}</em></div>
         <button class="icon-btn sm" id="d-discard" title="Discard">${icon('x', 15)}</button></div>
       <div class="insights">${draftInsights(d)}</div>
       ${body}
       <div class="dc-foot">
-        <span class="${short ? 'bad' : 'muted'}">${short ? `You have ${d.available} free — not enough` : `You have ${credits(d.available)} free`}</span>
-        <button class="btn primary" id="d-post" ${short ? 'disabled' : ''}>${d.invitee ? (d.invitee.start_at != null ? 'Send booking' : 'Send request') : 'Post request'} · <span id="d-cost">${credits(cost)}</span></button>
+        <span class="${short || d.needs_when ? 'bad' : 'muted'}">${d.needs_when ? 'Pick when you need help' : short ? `You have ${d.available} free — not enough` : `You have ${credits(d.available)} free`}</span>
+        <button class="btn primary" id="d-post" ${short || d.needs_when ? 'disabled' : ''}>${d.invitee ? (d.invitee.start_at != null ? 'Send booking' : 'Send request') : 'Post request'} · <span id="d-cost">${credits(cost)}</span></button>
       </div>
     </div>`;
   const range = $('d-range');
@@ -570,12 +648,67 @@ function renderDraft() {
       jiran.draftCredits = Number(range.value);
       $('d-credits').textContent = range.value;
       $('d-cost').textContent = credits(jiran.draftCredits);
-      $('d-post').disabled = jiran.draftCredits > d.available;
+      $('d-post').disabled = jiran.draftCredits > d.available || d.needs_when;
     };
   }
+  if (asksWhen) wireDraftFields(d);
   for (const b of el.querySelectorAll('[data-res]')) b.onclick = () => openResident(b.dataset.res, true);
   $('d-discard').onclick = () => { jiran.draft = null; jiran.target = null; jiran.dest = null; renderDraft(); redraw(); syncMarkers(); };
   $('d-post').onclick = postDraft;
+}
+
+/* When and how long: what neighbours need before they can say yes. Filled in from what the
+ * AI read in the request; when it couldn't tell, the resident has to pick a day. */
+const DURATIONS = [30, 60, 90, 120, 180, 240];
+const fmtMinutes = (m) => (m < 60 ? `${m} min` : `${+(m / 60).toFixed(1)} h`);
+
+function draftFields(d) {
+  const u = d.understanding;
+  const today = Math.floor(nowMinute() / 1440);
+  let day = '', time = '19:00';
+  if (d.task.start_at != null) {
+    const m = minuteOf(d.task.start_at);
+    day = String(Math.floor(m / 1440) - today);
+    time = hhmm(m);
+  } else if (u.start_choice === 'asap') {
+    day = 'asap';
+  }
+  const days = Array.from({length: 7}, (_, i) =>
+    [String(i), i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : DAY_NAMES[(today + i) % 7]]);
+  const minutes = u.est_minutes;
+  const durations = DURATIONS.includes(minutes) ? DURATIONS : [...DURATIONS, minutes].sort((a, b) => a - b);
+  return `<div class="dfields ev-form ${d.needs_when ? 'needs' : ''}">
+      <div class="fl"><span>When${d.needs_when ? ' <i class="req">· required</i>' : ''}</span>
+        <div class="dwhen">
+          <select id="d-day" aria-label="Day">
+            ${day === '' ? '<option value="" selected>Pick a day…</option>' : ''}
+            <option value="asap" ${day === 'asap' ? 'selected' : ''}>As soon as possible</option>
+            ${days.map(([v, label]) => `<option value="${v}" ${v === day ? 'selected' : ''}>${label}</option>`).join('')}
+          </select>
+          <input type="time" id="d-time" value="${time}" aria-label="Time" ${day === '' || day === 'asap' ? 'hidden' : ''}>
+        </div></div>
+      <div class="fl"><span>How long</span>
+        <select id="d-mins" aria-label="How long">${durations.map((m) =>
+          `<option value="${m}" ${m === minutes ? 'selected' : ''}>${fmtMinutes(m)}</option>`).join('')}</select></div>
+    </div>`;
+}
+
+function wireDraftFields(d) {
+  const redraft = () => {
+    const day = $('d-day').value;
+    const opts = {minutes: Number($('d-mins').value)};
+    if (day === 'asap') opts.asap = true;
+    else if (day !== '') {
+      const [hh, mm] = ($('d-time').value || '19:00').split(':').map(Number);
+      const start = (Math.floor(nowMinute() / 1440) + Number(day)) * 1440 + hh * 60 + mm;
+      opts.when_at = (start - CLOCK_START_MIN) * 60;
+    }
+    jiran.draftOpts = opts;
+    askGrid(true);
+  };
+  $('d-day').onchange = redraft;
+  $('d-time').onchange = redraft;
+  $('d-mins').onchange = redraft;
 }
 
 async function postDraft() {
@@ -589,6 +722,8 @@ async function postDraft() {
     description: $('ask-text').value.trim(),
   }, (o) => (d.invitee
     ? `${d.invitee.start_at != null ? 'Booking request' : 'Request'} sent to ${d.invitee.name.split(' ')[0]}`
+    : o.created[0].kind === 'help' && o.created.length === 1
+    ? `Posted! ${o.created[0].pinged.map((c) => c.name.split(' ')[0]).join(', ') || 'Neighbours'} pinged — choose from the offers as they come in`
     : o.created.length > 1
     ? `Posted as ${o.created.length} jobs — neighbours notified`
     : `Posted! ${o.created[0].pinged.map((c) => c.name.split(' ')[0]).join(', ') || 'Neighbours'} notified`
@@ -609,30 +744,63 @@ async function postDraft() {
 function taskCardRow(t, extra = '') {
   const cat = CATEGORIES[catOf(t)];
   const dist = distFromMe(t.lon, t.lat);
-  const sdp = t.requester === 'sdp';
-  return `<button class="tcard ${t.urgency >= 3 && t.status === 'open' ? 'urgent' : ''} ${isSelected('task', t.id) ? 'sel' : ''}" data-task="${t.id}">
+  const forMe = !jiran.admin && pingedMe(t);
+  return `<button class="tcard ${t.urgency >= 3 && t.status === 'open' ? 'urgent' : ''} ${forMe ? 'for-you' : ''} ${isSelected('task', t.id) ? 'sel' : ''}" data-task="${t.id}">
       <span class="tc-ic" style="--c:${cat.color}">${icon(cat.icon, 20)}</span>
       <span class="tc-main">
         <b>${esc(t.title)}</b>
-        <em>${esc(whenOf(t))}</em>
-        <em class="tc-meta">${sdp ? 'By SDP Management' : `${avatarHtml(t.requester, {size: 16})}${esc(firstName(t.requester))}`}
+        <em>${esc(whenOf(t))}${forMe ? ` · <span class="for-you-tag">${icon('star', 11)}Good match for you</span>` : ''}</em>
+        <em class="tc-meta">${avatarHtml(t.requester, {size: 16})}${esc(firstName(t.requester))}
           ${dist != null && t.requester !== jiran.me ? ` · ${fmtDist(dist)} away` : ''}${extra}</em>
       </span>
       <span class="cr-pill">${credits(t.credits)}</span>
     </button>`;
 }
 
+/* The nearby list marks requests you've already offered on. */
+function offeredTag(t) {
+  return !jiran.admin && myOffer(t)?.status === 'offered' ? ' · <span class="st st-completed">Offer sent</span>' : '';
+}
+
+/** An SDP event in a list: when, where, places taken, and whether you're going. */
+function eventCardRow(e) {
+  const cat = CATEGORIES.community;
+  const mine = myEventSignup(e);
+  const dist = distFromMe(e.lon, e.lat);
+  const live = e.status === 'live';
+  const full = e.joined >= e.slots;
+  const tag = jiran.admin
+    ? `${e.joined}/${e.slots} joined${live ? ` · ${e.checked_in} checked in` : ''}`
+    : mine ? `<span class="st st-completed">${mine.status === 'joined' ? 'You’re going' : mine.status === 'checked_in' ? 'Checked in' : 'Done'}</span>`
+    : full ? 'Full' : `${e.slots - e.joined} place${e.slots - e.joined === 1 ? '' : 's'} left`;
+  return `<button class="tcard ecard ${live ? 'live' : ''} ${isSelected('event', e.id) ? 'sel' : ''}" data-event="${e.id}">
+      <span class="tc-ic" style="--c:${cat.color}">${icon('flag', 20)}</span>
+      <span class="tc-main">
+        <b>${esc(e.title)}</b>
+        <em>${e.start_at == null ? 'Any time' : live ? '<span class="live-dot"></span>Happening now' : esc(e.when)} · ${esc(e.place_name || 'Elmina')}${dist != null ? ` · ${fmtDist(dist)}` : ''}</em>
+        <em class="tc-meta">${tag}</em>
+      </span>
+      <span class="cr-pill">${credits(e.credits)}</span>
+    </button>`;
+}
+
+function bindEventRows(root) {
+  for (const row of root.querySelectorAll('[data-event]')) row.onclick = () => openEvent(row.dataset.event, true);
+}
+
 function homeInsight() {
-  const open = liveTasks().filter((t) => t.status === 'open' && t.requester !== jiran.me && t.kind !== 'bounty'
+  const open = liveTasks().filter((t) => t.status === 'open' && t.requester !== jiran.me
     && (!t.invitee || t.invitee === jiran.me));
   const near = open.filter((t) => (distFromMe(t.lon, t.lat) ?? 9e9) < 500);
-  const available = jiran.residents.filter((r) => r.id !== jiran.me && personState(r.id)?.status === 'available'
-    && (distFromMe(r.lon, r.lat) ?? 9e9) < 600);
-  const moving = (state?.movers || []).filter((m) => !m.done).length;
+  const forMe = open.filter(pingedMe);
+  const active = jiran.residents.filter((r) => r.id !== jiran.me && ['available', 'moving', 'busy'].includes(personState(r.id)?.status)
+    && (distFromMe(r.lon, r.lat) ?? 9e9) < 800);
   const parts = [];
-  if (near.length) parts.push(`<b>${near.length} neighbour${near.length > 1 ? 's' : ''}</b> within 500 m could use a hand`);
-  if (available.length) parts.push(`<b>${available.length}</b> nearby are free right now`);
-  if (moving) parts.push(`<b>${moving}</b> on the move`);
+  if (forMe.length) parts.push(`<b>${forMe.length} request${forMe.length > 1 ? 's' : ''}</b> picked you as a good match`);
+  else if (near.length) parts.push(`<b>${near.length} neighbour${near.length > 1 ? 's' : ''}</b> within 500 m could use a hand`);
+  if (active.length) parts.push(`<b>${active.length}</b> neighbours active nearby`);
+  const next = communityEvents().find((e) => ['upcoming', 'live'].includes(e.status) && e.start_at != null);
+  if (next) parts.push(`next SDP event: <b>${esc(next.title)}</b>, ${next.status === 'live' ? 'happening now' : esc(next.when)}`);
   return parts.length ? aiInsight(parts.join(' · ') + '.') : '';
 }
 
@@ -640,10 +808,17 @@ function renderLeft(force = false) {
   const body = $('left-body');
   if (!body) return;
   if (force) { for (const k of Object.keys(sigs)) if (k.startsWith('left')) delete sigs[k]; }
-  $('ask-wrap').hidden = jiran.view !== 'home';
+  $('ask-wrap').hidden = jiran.admin || jiran.view !== 'home';
+  if (jiran.admin) {
+    if (!['live', 'merchants', 'events', 'economy', 'spatial'].includes(jiran.view)) jiran.view = 'live';
+  } else if (!['home', 'mine', 'community'].includes(jiran.view)) jiran.view = 'home';
   if (jiran.view === 'home') renderNearby();
   else if (jiran.view === 'mine') renderMine();
   else if (jiran.view === 'community') renderCommunity();
+  else if (jiran.view === 'live') renderAdminLive();
+  else if (jiran.view === 'merchants') renderMerchants();
+  else if (jiran.view === 'events') renderAdminEvents();
+  else if (jiran.view === 'economy') renderEconomy();
   else if (jiran.view === 'spatial') renderSpatial();
   railActive();
 }
@@ -652,6 +827,8 @@ function renderLeft(force = false) {
 function renderLeftLive() {
   if (jiran.view === 'home') renderNearby();
   else if (jiran.view === 'community') renderCommunity();
+  else if (jiran.view === 'live') renderAdminLive();
+  else if (jiran.view === 'events') renderEventList();
   renderBell();
 }
 
@@ -661,9 +838,10 @@ function bindTaskRows(root) {
 
 function renderNearby() {
   const all = liveTasks()
-    .filter((t) => t.status === 'open' && t.requester !== jiran.me && t.kind !== 'bounty' && jiran.filter.has(catOf(t))
+    .filter((t) => t.status === 'open' && t.requester !== jiran.me && jiran.filter.has(catOf(t))
       && (!t.invitee || t.invitee === jiran.me))
-    .sort((a, b) => (b.urgency - a.urgency) || ((distFromMe(a.lon, a.lat) ?? 0) - (distFromMe(b.lon, b.lat) ?? 0)));
+    .sort((a, b) => (pingedMe(b) - pingedMe(a)) || (b.urgency - a.urgency)
+      || ((distFromMe(a.lon, a.lat) ?? 0) - (distFromMe(b.lon, b.lat) ?? 0)));
   const shown = jiran.showAllNearby ? all : all.slice(0, 5);
   // A stable frame, then the insight line and the list filled separately: the insight's
   // numbers change every few seconds and must not re-animate the cards under it.
@@ -674,8 +852,8 @@ function renderNearby() {
   setHtml($('home-insight'), homeInsight(), 'left-home-insight');
   const list = `
     <div class="sec-head"><h3>Nearby for you</h3>${all.length > 5 ? `<button class="link" id="nearby-all">${jiran.showAllNearby ? 'Show less' : `View all ${all.length}`}</button>` : ''}</div>
-    <div class="tlist">${shown.map((t) => taskCardRow(t)).join('') ||
-      `<div class="empty-state">${icon('heart', 28)}<b>All quiet nearby</b><span>No open requests around you right now. Ask the grid, or check SDP bounties in Community.</span></div>`}</div>`;
+    <div class="tlist">${shown.map((t) => taskCardRow(t, offeredTag(t))).join('') ||
+      `<div class="empty-state">${icon('heart', 28)}<b>All quiet nearby</b><span>No open requests around you right now. Ask the grid, or join an SDP event in Community.</span></div>`}</div>`;
   if (setHtml($('home-list'), list, 'left-home-list')) {
     bindTaskRows($('home-list'));
     const more = $('nearby-all');
@@ -686,12 +864,20 @@ function renderNearby() {
 function renderMine() {
   const tasks = (jiran.meData?.tasks || []).filter((t) => t.status !== 'cancelled' && t.kind !== 'bundle');
   const asked = tasks.filter((t) => t.requester === jiran.me);
-  const helping = tasks.filter((t) => t.provider === jiran.me || (t.status === 'open' && t.invitee === jiran.me));
+  const helping = tasks.filter((t) => t.provider === jiran.me || (t.status === 'open' && t.invitee === jiran.me)
+    || (t.status === 'open' && myOffer(taskById(t.id) || t)?.status === 'offered'));
   const section = (title, list, empty, extra) => `
     <div class="sec-head"><h3>${title}</h3><span class="count">${list.length}</span></div>
     <div class="tlist">${list.map((t) => taskCardRow(t, extra(t))).join('') || `<p class="muted pad">${empty}</p>`}</div>`;
+  const offerLabel = (t) => {
+    const live = taskById(t.id) || t;
+    if (t.requester !== jiran.me) return 'Offer sent';
+    const n = offersOpen(live).length;
+    return n ? `${n} offer${n === 1 ? '' : 's'} · choose one` : 'Waiting for offers';
+  };
   const label = (t) => ` · <span class="st st-${t.status}">${{
-    open: t.invitee ? (t.invitee === jiran.me ? 'Asked you directly' : `Waiting for ${firstName(t.invitee)}`) : 'Waiting for a match',
+    open: t.offers_mode ? offerLabel(t)
+      : t.invitee ? (t.invitee === jiran.me ? 'Asked you directly' : `Waiting for ${firstName(t.invitee)}`) : 'Waiting for a match',
     reserved: `Booked · ${dayTimeLabel(t.start_at)}`, in_progress: 'On the way', arrived: 'Arrived', completed: 'Done',
   }[t.status] || t.status}</span>`;
   const html = `<div class="view-title"><h2>My tasks</h2><p>Your requests and the neighbours you’re helping.</p></div>` +
@@ -700,23 +886,248 @@ function renderMine() {
   if (setHtml($('left-body'), html, 'left-mine')) bindTaskRows($('left-body'));
 }
 
+/* A resident's Community: SDP events to join, then what neighbours have been doing, with
+ * nobody named. */
 function renderCommunity() {
-  const bounties = liveTasks().filter((t) => t.kind === 'bounty' && t.status === 'open');
-  const html = `<div class="view-title"><h2>Community</h2><p>SDP bounties and what’s happening in ${esc(world?.name || 'the township')}.</p></div>
-    <div class="sec-head"><h3>SDP bounties</h3><span class="count">${bounties.length}</span></div>
-    <div class="tlist">${bounties.map((t) => taskCardRow(t)).join('') || '<p class="muted pad">No bounties open.</p>'}</div>
-    <div class="dev-only" id="sdp-console"></div>
-    <div class="sec-head"><h3>Township activity</h3></div>
-    <div class="feed">${(state?.events || []).slice(0, 25).map((e) => eventRow(e)).join('')}</div>`;
-  if (setHtml($('left-body'), html, 'left-community')) {
-    bindTaskRows($('left-body'));
-    if (jiran.dev) renderSdpConsole();
+  const events = communityEvents().filter((e) => ['upcoming', 'live'].includes(e.status));
+  const stats = state?.stats || {};
+  const joined = events.filter((e) => myEventSignup(e)).length;
+  const html = `<div class="view-title"><h2>Community</h2><p>SDP events and what neighbours are doing in ${esc(world?.name || 'the township')}.</p></div>
+    <div class="stat-row">
+      <div class="stat"><b>${stats.week_favours ?? 0}</b><span>favours done this week</span></div>
+      <div class="stat"><b>${events.length}</b><span>SDP events open</span></div>
+      <div class="stat"><b>${joined}</b><span>you’ve joined</span></div>
+    </div>
+    <div class="sec-head"><h3>SDP events</h3><span class="count">${events.length}</span></div>
+    <div class="tlist">${events.map(eventCardRow).join('') || '<p class="muted pad">No SDP events right now.</p>'}</div>
+    <div class="sec-head"><h3>Community highlights</h3></div>
+    <div class="feed">${(state?.highlights || []).map(highlightRow).join('') ||
+      '<p class="muted pad">Nothing yet — be the first to help.</p>'}</div>`;
+  if (setHtml($('left-body'), html, 'left-community')) bindEventRows($('left-body'));
+}
+
+const HIGHLIGHT_ICON = {completed: 'heart', event: 'megaphone', event_live: 'flag', event_paid: 'users'};
+function highlightRow(h) {
+  return `<div class="ev ev-${h.kind}"><span class="ev-ic ev-${h.kind}">${icon(HIGHLIGHT_ICON[h.kind] || 'sparkle', 15)}</span>
+    <span class="ev-text">${esc(h.public)}<em>${simClock(h.t)}</em></span></div>`;
+}
+
+/* ------------------------------------------------------------ SDP admin views */
+
+function statTiles(tiles) {
+  return `<div class="stat-row">${tiles.map(([n, label, cls]) =>
+    `<div class="stat ${cls || ''}"><b>${n}</b><span>${label}</span></div>`).join('')}</div>`;
+}
+
+const ADMIN_STATUS = {open: 'Waiting for a match', reserved: 'Booked', in_progress: 'On the way',
+  arrived: 'Helper arrived', completed: 'Done'};
+
+/** One request as SDP sees it: who asked, who was pinged, who took it. */
+function adminTaskRow(t) {
+  const cat = CATEGORIES[catOf(t)];
+  const pinged = (t.pinged || []).map(firstName).join(', ');
+  return `<button class="arow" data-task="${t.id}">
+      <span class="sr-ic" style="--c:${cat.color}">${icon(cat.icon, 15)}</span>
+      <span class="arow-main"><b>${esc(t.title)}</b>
+        <span class="arow-who">${avatarHtml(t.requester, {size: 18})}${esc(firstName(t.requester))}
+          ${icon('arrowRight', 12)}
+          ${t.provider ? `${avatarHtml(t.provider, {size: 18})}${esc(firstName(t.provider))}`
+            : offersOpen(t).length ? `${avatarStack(offersOpen(t).map((o) => o.resident), 18)}<em class="muted">offered</em>`
+            : `<em class="muted">${pinged ? `pinged ${esc(pinged)}` : 'nobody yet'}</em>`}</span>
+        <em class="st st-${t.status}">${t.status === 'open' && t.offers_mode
+          ? (offersOpen(t).length ? `${offersOpen(t).length} offer${offersOpen(t).length === 1 ? '' : 's'} · waiting for ${esc(firstName(t.requester))} to choose` : 'Waiting for offers')
+          : ADMIN_STATUS[t.status] || t.status}${t.status === 'open' && t.invitee ? ` · asked ${esc(firstName(t.invitee))}` : ''}</em></span>
+      <span class="cr-pill">${t.credits}</span>
+    </button>`;
+}
+
+function renderAdminLive() {
+  const s = state?.stats || {};
+  const tasks = liveTasks().sort((a, b) => b.created_t - a.created_t);
+  const active = tasks.filter((t) => t.status !== 'open');
+  const open = tasks.filter((t) => t.status === 'open');
+  if (setHtml($('left-body'), `<div class="view-title"><h2>Live</h2><p>Every request in ${esc(world?.name || 'the township')}, who was pinged and who took it.</p></div>
+      <div id="admin-tiles"></div><div id="admin-tasks"></div>
+      <div class="sec-head"><h3>Township activity</h3><span class="count">all names</span></div>
+      <div class="feed" id="admin-feed"></div>`, 'left-live')) {
+    for (const k of ['left-live-tiles', 'left-live-tasks', 'left-live-feed']) delete sigs[k];
+  }
+  setHtml($('admin-tiles'), statTiles([[s.residents ?? 0, 'residents'], [open.length, 'open requests'],
+    [active.length, 'matched now'], [s.moving ?? 0, 'on the move']]), 'left-live-tiles');
+  if (setHtml($('admin-tasks'), `
+      <div class="sec-head"><h3>Matched and on the way</h3><span class="count">${active.length}</span></div>
+      <div class="alist">${active.map(adminTaskRow).join('') || '<p class="muted pad">No jobs under way.</p>'}</div>
+      <div class="sec-head"><h3>Waiting for a match</h3><span class="count">${open.length}</span></div>
+      <div class="alist">${open.map(adminTaskRow).join('') || '<p class="muted pad">Nothing waiting.</p>'}</div>`, 'left-live-tasks')) {
+    bindTaskRows($('admin-tasks'));
+  }
+  if (setHtml($('admin-feed'), (state?.events || []).slice(0, 30).map((e) => eventRow(e)).join(''), 'left-live-feed')) {
+    for (const row of $('admin-feed').querySelectorAll('[data-task]')) row.onclick = () => openFeedItem(row.dataset.task);
   }
 }
 
+function renderMerchants() {
+  const list = (world?.tenants || []).map((t) => ({...t, ...(jiran.tenantStats[t.id] || {})}));
+  const total = list.reduce((n, t) => n + (t.held_credits || 0), 0);
+  const html = `<div class="view-title"><h2>Merchants</h2><p>SDP tenants accepting Jiran Credits: 1 credit = RM2 off. Shops cash their credits out with SDP at the same RM2.</p></div>
+    ${statTiles([[list.length, 'shops'], [total, 'credits collected', 'gold'], [`RM${total * 2}`, 'discounts given']])}
+    <div class="alist">${list.map((t) => `
+      <div class="mrow" data-tenant="${t.id}">
+        <span class="rw-ic">${icon('store', 18)}</span>
+        <span class="arow-main"><b>${esc(t.name)}</b><em>${esc(t.category)}</em>
+          <em><b class="gold">${t.held_credits ?? '…'} cr</b> collected · RM${(t.held_credits ?? 0) * 2} to cash out</em></span>
+        <button class="btn sm gold" data-cashout="${t.id}" ${t.held_credits ? '' : 'disabled'} title="SDP pays RM2 for each credit">Cash out</button>
+      </div>`).join('')}</div>`;
+  if (setHtml($('left-body'), html, 'left-merchants')) {
+    for (const row of $('left-body').querySelectorAll('[data-tenant]')) {
+      row.onclick = (e) => { if (!e.target.closest('[data-cashout]')) openTenant(row.dataset.tenant, true); };
+    }
+    for (const b of $('left-body').querySelectorAll('[data-cashout]')) {
+      b.onclick = async () => {
+        await act(`/api/tenants/${b.dataset.cashout}/cashout`, {},
+          (o) => `${credits(o.credits)} cashed out → RM${o.rm.toFixed(2)} from SDP`);
+        refreshTenantStats();
+      };
+    }
+  }
+}
+
+/* -- SDP events: the organiser form and the events SDP is running ---------------- */
+
+const EVENT_DURATIONS = [30, 60, 90, 120, 180];
+
+/** A number field with its own − and + buttons, in place of the browser's spinner. */
+function numberStepper(id, value, min, max, disabled = false) {
+  return `<div class="stepper ${disabled ? 'off' : ''}">
+      <button type="button" data-step="-1" data-for="${id}" ${disabled ? 'disabled' : ''} aria-label="Less">${icon('minus', 15)}</button>
+      <input id="${id}" type="number" min="${min}" max="${max}" value="${value}" ${disabled ? 'disabled' : ''}>
+      <button type="button" data-step="1" data-for="${id}" ${disabled ? 'disabled' : ''} aria-label="More">${icon('plus', 15)}</button>
+    </div>`;
+}
+const eventForm = {title: '', description: '', day: 0, time: '09:00', anytime: false,
+                   duration: 90, slots: 8, credits: 3};
+
+function renderAdminEvents() {
+  const now = nowMinute();
+  const today = Math.floor(now / 1440);
+  const days = Array.from({length: 7}, (_, i) => {
+    const d = today + i;
+    return [i, i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : DAY_NAMES[d % 7]];
+  });
+  const spot = jiran.eventSpot;
+  const marks = township.landmarks.filter((m) => m.kind === 'park' || m.kind === 'water' || m.kind === 'civic');
+  const f = eventForm;
+  const html = `<div class="view-title"><h2>SDP events</h2><p>Host a community event. Volunteers join, GPS checks them in at the venue, and SDP pays everyone who turned up.</p></div>
+    <div class="ev-form">
+      <label class="fl"><span>Title</span><input id="ef-title" maxlength="80" placeholder="e.g. Eco Lake clean-up" value="${esc(f.title)}"></label>
+      <label class="fl"><span>What volunteers do</span><textarea id="ef-desc" rows="2" maxlength="600" placeholder="Gloves and bags provided. Meet at the lakeside path.">${esc(f.description)}</textarea></label>
+      <div class="fl"><span>Where</span>
+        <div class="where">
+          <select id="ef-place">
+            <option value="">${spot ? esc(spot.name) : 'Choose a place…'}</option>
+            ${marks.map((m, i) => `<option value="${i}">${esc(m.name)}</option>`).join('')}
+          </select>
+          <button class="btn sm" id="ef-pick">${icon('locate', 14)}Pick on map</button>
+        </div>
+        <em class="hint">${spot ? `${icon('check', 12)} Meets at <b>${esc(spot.name)}</b>` : 'Or click any building and choose “Host an SDP event here”.'}</em>
+      </div>
+      <div class="fl"><span>When</span>
+        <label class="chk"><input type="checkbox" id="ef-any" ${f.anytime ? 'checked' : ''}> Any time — a one-off job for one volunteer</label>
+        <div class="when" ${f.anytime ? 'hidden' : ''}>
+          <select id="ef-day">${days.map(([i, label]) => `<option value="${i}" ${i === f.day ? 'selected' : ''}>${label}</option>`).join('')}</select>
+          <input type="time" id="ef-time" value="${f.time}">
+          <select id="ef-dur">${EVENT_DURATIONS.map((m) => `<option value="${m}" ${m === f.duration ? 'selected' : ''}>${m < 60 ? `${m} min` : `${m / 60} h`}</option>`).join('')}</select>
+        </div>
+      </div>
+      <div class="two">
+        <div class="fl"><span>Volunteers</span>${numberStepper('ef-slots', f.anytime ? 1 : f.slots, 1, 50, f.anytime)}</div>
+        <div class="fl"><span>Credits each</span>${numberStepper('ef-credits', f.credits, 1, 20)}</div>
+      </div>
+      <button class="btn primary big" id="ef-post">${icon('flag', 16)}Publish event</button>
+    </div>
+    <div id="admin-events"></div>`;
+  setHtml($('left-body'), html, 'left-events');
+  delete sigs['left-events-list'];
+  renderEventList();
+  const keep = () => {
+    f.title = $('ef-title').value; f.description = $('ef-desc').value;
+    f.day = Number($('ef-day').value); f.time = $('ef-time').value || f.time;
+    f.duration = Number($('ef-dur').value); f.slots = Number($('ef-slots').value) || 1;
+    f.credits = Number($('ef-credits').value) || 1; f.anytime = $('ef-any').checked;
+  };
+  for (const id of ['ef-title', 'ef-desc', 'ef-day', 'ef-time', 'ef-dur', 'ef-slots', 'ef-credits']) $(id).onchange = keep;
+  $('ef-any').onchange = () => { keep(); renderLeft(true); };
+  for (const b of $('left-body').querySelectorAll('[data-step]')) {
+    b.onclick = () => {
+      const input = $(b.dataset.for);
+      const v = (Number(input.value) || 0) + Number(b.dataset.step);
+      input.value = Math.max(Number(input.min), Math.min(Number(input.max), v));
+      keep();
+    };
+  }
+  $('ef-place').onchange = (ev) => {
+    const m = marks[Number(ev.target.value)];
+    if (m) { keep(); setEventSpot({lon: m.lonlat[0], lat: m.lonlat[1], name: m.name}); }
+  };
+  $('ef-pick').onclick = () => { keep(); pickEventSpot(); };
+  $('ef-post').onclick = async () => {
+    keep();
+    if (!jiran.eventSpot) { toast('Choose where the event meets first', false); return; }
+    const [hh, mm] = f.time.split(':').map(Number);
+    const startMinute = (today + f.day) * 1440 + hh * 60 + mm;
+    const body = {
+      title: f.title.trim(), description: f.description.trim(), place_name: jiran.eventSpot.name,
+      lon: jiran.eventSpot.lon, lat: jiran.eventSpot.lat,
+      start_at: f.anytime ? null : (startMinute - CLOCK_START_MIN) * 60,
+      duration_min: f.anytime ? 30 : f.duration, slots: f.anytime ? 1 : f.slots, credits: f.credits,
+    };
+    const out = await act('/api/community-events', body, (o) => `Published: ${o.title} · ${o.when}`);
+    if (!out) return;
+    Object.assign(eventForm, {title: '', description: ''});
+    jiran.eventSpot = null;
+    renderLeft(true);
+    syncMarkers();
+    setTimeout(() => openEvent(out.id, true), 300);
+  };
+}
+
+function renderEventList() {
+  const el = $('admin-events');
+  if (!el) return;
+  const all = communityEvents();
+  const running = all.filter((e) => ['upcoming', 'live'].includes(e.status));
+  const ended = all.filter((e) => e.status === 'ended');
+  const html = `<div class="sec-head"><h3>Running and upcoming</h3><span class="count">${running.length}</span></div>
+    <div class="tlist">${running.map(eventCardRow).join('') || '<p class="muted pad">No events yet. Publish one above.</p>'}</div>
+    ${ended.length ? `<div class="sec-head"><h3>Just ended</h3><span class="count">${ended.length}</span></div>
+      <div class="tlist">${ended.map(eventCardRow).join('')}</div>` : ''}`;
+  if (setHtml(el, html, 'left-events-list')) bindEventRows(el);
+}
+
+async function renderEconomy() {
+  let e;
+  try { e = await api('/api/economy'); } catch (err) { return; }
+  if (jiran.view !== 'economy') return;
+  const html = `<div class="view-title"><h2>Economy</h2><p>Every Jiran Credit is a row in a double-entry ledger. Only SDP creates credits; neighbours helping each other only move them.</p></div>
+    ${statTiles([[e.issued, 'issued by SDP'], [e.circulating, 'with residents'], [e.in_escrow, 'held in escrow']])}
+    ${statTiles([[e.held_by_tenants, 'collected by shops', 'gold'], [e.returned_to_sdp, 'cashed out by shops'], [e.paid_for_events, 'paid for SDP events']])}
+    <div class="ledger-check ${e.ledger_sums_to_zero ? 'ok' : 'bad'}">${icon(e.ledger_sums_to_zero ? 'shield' : 'alert', 18)}
+      <span><b>${e.ledger_sums_to_zero ? 'The books balance' : 'Ledger error'}</b>
+      <em>${e.ledger_sums_to_zero ? 'Every credit issued is accounted for: wallets, escrow, shops and the treasury sum to zero.' : 'The ledger does not sum to zero.'}</em></span></div>
+    <div class="rules">
+      <div>${icon('sparkle', 15)}<span><b>${e.seed_grant} credits</b> welcome grant for each verified resident</span></div>
+      <div>${icon('flag', 15)}<span><b>SDP events</b> pay volunteers who are GPS checked in</span></div>
+      <div>${icon('heart', 15)}<span><b>Helping a neighbour</b> moves credits through escrow</span></div>
+      <div>${icon('store', 15)}<span><b>1 credit = RM${e.rm_per_credit}</b> off at SDP shops, and shops cash out at RM${e.rm_per_credit}</span></div>
+    </div>`;
+  setHtml($('left-body'), html, 'left-economy');
+}
+
 const EVENT_ICON = {posted: 'megaphone', accepted: 'heart', pickup: 'car', arrived: 'pin',
-  completed: 'check', redeemed: 'gift', rebate: 'store', bounty: 'flag', no_show: 'alert',
-  strike: 'alert', fraud: 'alert', cancelled: 'x', system: 'users', warning: 'alert'};
+  completed: 'check', redeemed: 'gift', cashout: 'store', no_show: 'alert',
+  strike: 'alert', fraud: 'alert', cancelled: 'x', system: 'users', warning: 'alert',
+  event: 'flag', joined: 'users', left: 'x', event_live: 'flag', checked_in: 'pin', event_paid: 'coin',
+  offered: 'heart', withdrawn: 'x', chosen: 'star', expired: 'clock'};
 
 function eventRow(e) {
   const lead = e.actor && resident(e.actor)
@@ -734,32 +1145,8 @@ function renderActivity() {
   jiran.lastEventId = top;
   renderBell();
   if (jiran.view === 'community') renderCommunity();
+  if (jiran.view === 'live') renderAdminLive();
   return fresh;
-}
-
-async function renderSdpConsole() {
-  const el = $('sdp-console');
-  if (!el) return;
-  let e, tenants;
-  try { [e, tenants] = await Promise.all([api('/api/economy'), api('/api/tenants')]); } catch (err) { return; }
-  el.innerHTML = `<div class="sec-head"><h3>SDP console</h3><span class="count">dev</span></div>
-    <div class="dev-grid"><span>Issued <b>${e.issued}</b></span><span>Circulating <b>${e.circulating}</b></span>
-      <span>Escrow <b>${e.in_escrow}</b></span><span>Books <b class="${e.ledger_sums_to_zero ? 'ok' : 'bad'}">${e.ledger_sums_to_zero ? 'balance' : 'ERROR'}</b></span></div>
-    <div class="sdp-form"><input id="b-title" placeholder="New bounty, e.g. Photograph the broken swing" maxlength="80">
-      <input id="b-credits" type="number" min="1" max="20" value="3"><button class="btn sm" id="b-post">Post</button></div>
-    ${tenants.map((t) => `<div class="sdp-tenant"><span>${esc(t.name)}</span><em>${t.held_credits} cr · cap RM${t.rebate_cap_rm.toFixed(0)}</em>
-      <button class="btn sm" data-rebate="${t.id}" ${t.held_credits ? '' : 'disabled'}>Rebate</button></div>`).join('')}`;
-  $('b-post').onclick = async () => {
-    const body = {title: $('b-title').value.trim(), credits: Number($('b-credits').value), skills: ['errands']};
-    if (selectedBuilding) body.building = selectedBuilding; else Object.assign(body, {lon: world.centre.lon, lat: world.centre.lat});
-    if (await act('/api/bounties', body, (o) => `Bounty posted: ${o.title}`)) renderSdpConsole();
-  };
-  for (const b of el.querySelectorAll('[data-rebate]')) {
-    b.onclick = async () => {
-      await act(`/api/tenants/${b.dataset.rebate}/rebate`, {}, (o) => `${o.credits} cr → RM${o.rebate_rm.toFixed(2)} off rent`);
-      renderSdpConsole();
-    };
-  }
 }
 
 /* ------------------------------------------------------------- right panel */
@@ -769,11 +1156,11 @@ function ledgerLine(e) {
   const title = t?.title || e.task_id || '';
   const map = {
     seed: ['Welcome to JiranSync', 'Verified resident bonus', 'sparkle'],
-    release: e.amount > 0 ? [t?.kind === 'bounty' ? 'SDP bounty reward' : 'Thanks for helping', title, 'heart'] : ['Paid', title, 'check'],
+    release: e.amount > 0 ? ['Thanks for helping', title, 'heart'] : ['Paid', title, 'check'],
     escrow: ['Held for your request', title, 'clock'],
     refund: ['Refunded', title, 'swap'],
     redeem: ['Spent at a local shop', (e.memo || '').replace(/^RM[\d.]+ off at /, ''), 'gift'],
-    bounty: ['SDP reward', title, 'flag'],
+    event: ['SDP event reward', (e.memo || '').replace(/^SDP event: /, ''), 'flag'],
   };
   const [head, sub, ic] = map[e.kind] || [e.memo || e.kind, '', 'coin'];
   return `<div class="lrow"><span class="lr-ic ${e.amount > 0 ? 'in' : 'out'}">${icon(ic, 15)}</span>
@@ -817,5 +1204,5 @@ function renderWallet() {
     }
   }
   setHtml($('my-activity'), m.ledger.slice(0, 8).map(ledgerLine).join('') ||
-    `<div class="empty-state small">${icon('coin', 24)}<b>No activity yet</b><span>Help a neighbour to earn your first credits.</span></div>`);
+    `<div class="empty-state small">${icon('coin', 24)}<b>No activity yet</b><span>Help a neighbour or join an SDP event to earn credits.</span></div>`);
 }

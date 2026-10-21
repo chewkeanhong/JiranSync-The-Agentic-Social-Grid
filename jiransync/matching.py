@@ -5,6 +5,10 @@ a request *means*; deciding who gets asked is arithmetic over facts the platform
 skills, where people live, when they are free, whether they turn up -- so the same task
 always ranks the same neighbours, and every rank comes with its reasons.
 
+Who you already know counts too. Neighbours who have helped you, or whom you have helped,
+rank a little higher and say so ("Helped you twice before"); so do neighbours you are
+volunteering beside at an SDP event. Trust is what makes someone hand over their baby.
+
 Distance is a walking time over the real street graph, not a radius: the neighbour across
 the monsoon drain may be 40 m away as the crow flies and ten minutes on foot. A driver is
 ranked by how long the drive to the pickup actually takes on the current roads, and when
@@ -40,6 +44,12 @@ INDOOR_MPS = 1.2
 
 WEIGHTS = {"skill": 0.40, "proximity": 0.25, "schedule": 0.20, "reliability": 0.15}
 DIRECTION_BONUS = 0.20
+# Familiarity: each past favour between you, either way, up to two; and an SDP event you
+# share. Small on purpose -- a stranger with the right skill still outranks a friend without.
+FAMILIAR_BONUS = 0.06
+SHARED_EVENT_BONUS = 0.04
+# Homes this close are "around the corner".
+NEAR_M = 150.0
 
 # Below this, nobody in reach can genuinely do the job and the commercial fallback offers
 # a verified tenant instead.
@@ -66,6 +76,12 @@ class Candidate:
     spatial: dict | None = None
     # Drive time to the pickup, for rides ranked on the road network.
     pickup_min: float | None = None
+    # What connects you: "Helped you twice before", "Lives around the corner".
+    ties: list[str] | None = None
+    # Has helped you or been helped by you before.
+    familiar: bool = False
+    # Picked as the one new face among the three a request pings.
+    ties_new: bool = False
 
     def to_dict(self) -> dict:
         out = asdict(self)
@@ -153,14 +169,42 @@ def spatial_access(task: dict, r: dict, network: RoadNetwork | None, frame) -> d
             "access_s": round(seconds, 1)}
 
 
+def _times(n: int) -> str:
+    return {1: "once", 2: "twice"}.get(n, f"{n}×")
+
+
+def social_ties(social: dict | None, straight_m: float, ride: bool) -> tuple[list[str], bool, float]:
+    """What links a neighbour to the requester, whether they know each other, and the bonus.
+
+    ``social`` is {"helped_me": n, "i_helped": n, "events": [(title, upcoming)]}.
+    """
+    ties, bonus = [], 0.0
+    social = social or {}
+    helped_me, i_helped = social.get("helped_me", 0), social.get("i_helped", 0)
+    if helped_me:
+        ties.append(f"Helped you {_times(helped_me)} before")
+    if i_helped:
+        ties.append(f"You helped them {_times(i_helped)}")
+    bonus += FAMILIAR_BONUS * min(2, helped_me + i_helped)
+    events = social.get("events") or []
+    if events:
+        title, upcoming = events[0]
+        ties.append(f"You’re both going to {title}" if upcoming else f"You both volunteered at {title}")
+        bonus += SHARED_EVENT_BONUS
+    if not ride and straight_m <= NEAR_M:
+        ties.append("Lives around the corner")
+    return ties, bool(helped_me or i_helped), bonus
+
+
 def rank(task: dict, residents: list[dict], *, network: RoadNetwork | None = None,
          frame=None, limit: int = 5, exclude: set[str] | None = None,
-         drive: RoadNetwork | None = None) -> list[Candidate]:
+         drive: RoadNetwork | None = None, social: dict | None = None) -> list[Candidate]:
     """Score every eligible neighbour for a task, best first.
 
     ``network`` is the walking graph. ``drive``, when given, ranks drivers for a ride by
     their real drive time to the pickup -- including any roadworks or flooding on it --
-    instead of by straight-line distance.
+    instead of by straight-line distance. ``social`` maps a resident id to what links them
+    to the requester (see ``social_ties``).
     """
     exclude = set(exclude or ()) | {task.get("requester")}
     here = (task["lon"], task["lat"])
@@ -248,10 +292,13 @@ def rank(task: dict, residents: list[dict], *, network: RoadNetwork | None = Non
             # Skills mean little for a lift; a car heading the right way means everything.
             score = (0.45 * proximity + 0.25 * schedule + 0.30 * reliability
                      + (DIRECTION_BONUS * 2 if direction else 0.0))
+        ties, familiar, bonus = social_ties((social or {}).get(r["id"]), straight, ride)
+        score += bonus
 
         out.append(Candidate(r["id"], r["name"], score, skill, proximity, schedule,
                              reliability, None if walk is None else round(walk, 1),
-                             direction, reasons, r["lon"], r["lat"], spatial, pickup_min))
+                             direction, reasons, r["lon"], r["lat"], spatial, pickup_min,
+                             ties, familiar))
 
     out.sort(key=lambda c: (-c.score, c.resident_id))
     return out[:limit]

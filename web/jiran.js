@@ -5,6 +5,14 @@
  * what is selected, which categories are shown), decides who appears on the map and in
  * what state, and wires the panels and cards in web/components/ to the HTTP API.
  *
+ * Two ways in, from the account menu:
+ *
+ *   resident   your home, requests around you (placed on the street, not at a door),
+ *              SDP events, shops and stations. Other neighbours are not on the map; the
+ *              one helping you appears, face and route, only while the job runs.
+ *   SDP admin  the operations view: every resident by name, every request and who took
+ *              it, what each shop has collected, and the SDP events console.
+ *
  *   components/icons.js    icon set, categories, resident states
  *   components/avatar.js   stable generated portraits per resident id
  *   components/markers.js  HTML markers pinned to 3D positions
@@ -31,10 +39,16 @@ const jiran = {
   framed: false,
   showAllNearby: false,
   rightOpen: false,
+  admin: false,           // SDP admin view rather than a resident's
+  tenantStats: {},        // admin: tenant id -> {held_credits}
+  eventSpot: null,        // admin: where a new event meets, {lon, lat, name}
+  picking: false,         // admin: the next map click picks eventSpot
+  profileFrom: null,      // the request whose offers a profile was opened from
 };
 
+const ADMIN_ID = 'sdp-admin';
+
 const START_HOUR = 7.5;     // mirrors jiransync.grid.START_HOUR
-const PEOPLE_ON_MAP = 15;   // neighbours shown besides the ones doing something
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -78,12 +92,16 @@ async function act(path, body, success) {
 }
 
 const resident = (id) => jiran.byId[id] || null;
-const nameOf = (id) => (id === 'sdp' ? 'SDP Property Management' : resident(id)?.name || id);
-const firstName = (id) => (id === 'sdp' ? 'SDP' : nameOf(id).split(' ')[0]);
-const myHome = () => resident(jiran.me);
+const nameOf = (id) => resident(id)?.name || id;
+const firstName = (id) => nameOf(id).split(' ')[0];
+// The admin has no home on the map; everything measured "from you" is a resident's view.
+const myHome = () => (jiran.admin ? null : resident(jiran.me));
 const credits = (n) => `${n} Credit${Math.abs(n) === 1 ? '' : 's'}`;
 const hubById = (id) => (world?.hubs || []).find((h) => h.id === id) || null;
 const tenantById = (id) => (world?.tenants || []).find((t) => t.id === id) || null;
+const communityEvents = () => state?.community || [];
+const eventById = (id) => communityEvents().find((e) => e.id === id) || null;
+const myEventSignup = (e) => (e?.signups || []).find((s) => s.resident === jiran.me) || null;
 
 function simClock(t) {
   const m = START_HOUR * 60 + t / 60;
@@ -106,7 +124,7 @@ function catOf(t) {
   if (!t) return 'help';
   if (t.kind === 'ride') return 'ride';
   const skills = new Set(t.skills || []);
-  if (t.kind === 'bounty' || skills.has('cleaning') || skills.has('gardening')) return 'community';
+  if (skills.has('cleaning') || skills.has('gardening')) return 'community';
   if (skills.has('tutoring')) return 'tutoring';
   return 'help';
 }
@@ -153,6 +171,41 @@ function whenOf(t) {
 }
 
 function liveTasks() { return (state?.tasks || []).filter((t) => t.status !== 'completed'); }
+
+/** A resident sees open requests (not ones addressed to someone else) and their own jobs;
+ *  who is helping whom elsewhere in the township is SDP's to see, not the neighbours'. */
+function visibleTask(t) {
+  if (jiran.admin) return true;
+  if (t.requester === jiran.me || t.provider === jiran.me || t.invitee === jiran.me) return true;
+  return t.status === 'open' && !t.invitee;
+}
+
+const pingedMe = (t) => t.status === 'open' && (t.pinged || []).includes(jiran.me);
+
+/* Someone else's request is pinned to the street outside, not their front door: the
+ * nearest point on a named road, worked out once per request. */
+const streetPoints = new Map();
+function streetPoint(t) {
+  if (streetPoints.has(t.id)) return streetPoints.get(t.id);
+  let best = [t.lon, t.lat], bestD = Infinity;
+  const k = Math.cos(t.lat * Math.PI / 180);
+  for (const r of world?.roads?.features || []) {
+    for (const [x, y] of r.geometry.coordinates) {
+      const d = ((x - t.lon) * k) ** 2 + (y - t.lat) ** 2;
+      if (d < bestD) { bestD = d; best = [x, y]; }
+    }
+  }
+  // Only snap when the road is close; a pin a block away would point at the wrong house.
+  if (distanceM([t.lon, t.lat], best) > 70) best = [t.lon, t.lat];
+  streetPoints.set(t.id, best);
+  return best;
+}
+
+/** Where a request's pin stands: exact for your own and for SDP, the street for others. */
+function taskPoint(t) {
+  if (jiran.admin || t.requester === jiran.me || t.provider === jiran.me) return [t.lon, t.lat];
+  return streetPoint(t);
+}
 function taskById(id) {
   const live = (state?.tasks || []).find((t) => t.id === id);
   const detail = jiran.taskDetail.get(id);
@@ -167,7 +220,7 @@ function personState(id) {
   const r = resident(id);
   if (!r) return null;
   const movers = state?.movers || [];
-  const mover = movers.find((m) => !m.done && (m.resident === id
+  const mover = movers.find((m) => (!m.done || m.leg === 'event') && (m.resident === id
     || (m.passenger === id && m.leg === 'ride')));
   if (mover) {
     const riding = mover.resident !== id;
@@ -177,6 +230,12 @@ function personState(id) {
     else if (mover.leg === 'pickup') doing = `Picking up ${firstName(mover.passenger)}`;
     else if (mover.leg === 'ride') doing = `Driving ${firstName(mover.passenger)} to ${task?.dest_name || 'the station'}`;
     else if (mover.leg === 'go') doing = `On the way to help ${firstName(task?.requester)}`;
+    else if (mover.leg === 'event') {
+      const ev = eventById(mover.event_id);
+      doing = mover.done ? `Volunteering at ${ev?.title || 'an SDP event'}` : `Walking to ${ev?.title || 'an SDP event'}`;
+      return {status: mover.done ? 'busy' : 'moving', lonlat: [mover.lon, mover.lat], mover, doing,
+              mode: 'walk', event: ev};
+    }
     else doing = mover.mode === 'drive' ? 'Driving to the station' : 'Out and about';
     return {status: 'moving', lonlat: [mover.lon, mover.lat], mover, riding, task, doing,
             mode: mover.mode};
@@ -192,7 +251,20 @@ function personState(id) {
           doing: free ? 'Available now' : `Not free now · next free ${next ? next.label : 'time not listed'}`};
 }
 
-/** Who appears on the map: everyone doing something, you, and the nearest neighbours. */
+/** The neighbours a resident may see by face: whoever is helping them, or whom they are
+ *  helping, while that job is under way. */
+function myCounterparts() {
+  const out = new Set();
+  for (const t of liveTasks()) {
+    if (!['in_progress', 'arrived'].includes(t.status)) continue;
+    if (t.requester === jiran.me && t.provider) out.add(t.provider);
+    if (t.provider === jiran.me && t.kind === 'ride') out.add(t.requester);
+  }
+  return out;
+}
+
+/** Who appears on the map. The admin sees everyone; a resident sees themself and the
+ *  neighbour on their job, and nobody else. */
 function peopleOnMap() {
   if (!state || !jiran.residents.length) return [];
   const out = new Map();
@@ -201,20 +273,12 @@ function peopleOnMap() {
     const s = personState(id);
     if (s && !s.riding) out.set(id, s);
   };
-  for (const m of state.movers || []) if (!m.done) add(m.resident);
-  for (const t of liveTasks()) if (t.provider) add(t.provider);
-  add(jiran.me);
-  // Requesters are represented by their task's pin, standing at their door.
-  const asking = new Set(liveTasks().filter((t) => t.status === 'open').map((t) => t.requester));
-  const home = myHome();
-  const near = jiran.residents
-    .filter((r) => !out.has(r.id) && !asking.has(r.id))
-    .map((r) => ({r, d: home ? distanceM([home.lon, home.lat], [r.lon, r.lat]) : 0}))
-    .sort((a, b) => a.d - b.d);
-  for (const {r} of near) {
-    if (out.size >= PEOPLE_ON_MAP) break;
-    add(r.id);
+  if (jiran.admin) {
+    for (const r of jiran.residents) add(r.id);
+    return [...out.entries()].map(([id, s]) => ({id, ...s}));
   }
+  add(jiran.me);
+  for (const id of myCounterparts()) add(id);
   return [...out.entries()].map(([id, s]) => ({id, ...s}));
 }
 
@@ -224,7 +288,7 @@ function isSelected(kind, id) { return inspected?.kind === kind && inspected?.id
 
 function personMarker(p) {
   const r = resident(p.id);
-  const you = p.id === jiran.me;
+  const you = p.id === jiran.me && !jiran.admin;
   const passenger = p.mover?.leg === 'ride' && p.mover.passenger ? p.mover.passenger : null;
   const badge = p.status === 'moving'
     ? icon(p.mode === 'drive' ? 'car' : 'walk', 11)
@@ -252,15 +316,18 @@ function personMarker(p) {
 function taskMarker(t) {
   const cat = CATEGORIES[catOf(t)];
   const matched = t.status !== 'open';
+  const forMe = !jiran.admin && pingedMe(t);
+  const [lon, lat] = taskPoint(t);
   return {
     key: `t:${t.id}`, kind: 'task',
-    lonlat: [t.lon, t.lat], z: groundAt(t.lon, t.lat) + pinHeight(t),
-    cls: `${matched ? 'matched' : ''} ${t.urgency >= 3 && !matched ? 'urgent' : ''} ${isSelected('task', t.id) ? 'sel' : ''}`,
+    lonlat: [lon, lat], z: groundAt(lon, lat) + pinHeight(t),
+    cls: `${matched ? 'matched' : ''} ${t.urgency >= 3 && !matched ? 'urgent' : ''} ${forMe ? 'for-you' : ''} ${isSelected('task', t.id) ? 'sel' : ''}`,
     html: `<div class="pt" style="--c:${cat.color}">
         <span class="pt-head">${icon(cat.icon, 17)}</span>
         <span class="pt-cr">${t.credits}</span>
-        ${t.requester !== 'sdp' ? `<span class="pt-who">${avatarSvg(t.requester)}</span>` : `<span class="pt-who sdp">${icon('megaphone', 10)}</span>`}
+        <span class="pt-who">${avatarSvg(t.requester)}</span>
         ${matched ? `<i class="pt-ok">${icon('check', 9)}</i>` : ''}
+        ${forMe ? `<span class="pt-for">${icon('star', 10)}Good match for you</span>` : ''}
         <span class="pt-label">${esc(t.title)}</span>
       </div>`,
     title: `${t.title} · ${credits(t.credits)}`,
@@ -272,6 +339,12 @@ function taskMarker(t) {
 function tenantMarker(tenant) {
   const b = world.buildingById[tenant.building];
   const cat = CATEGORIES.commercial;
+  const st = jiran.tenantStats[tenant.id];
+  // A resident sees what the shop offers; SDP sees what it has collected.
+  const sub = jiran.admin
+    ? (st ? `<b class="gold">${st.held_credits} cr collected</b> · RM${st.held_credits * 2} to cash out` : 'Credits collected: …')
+    : esc(shortOffer(tenant.offer)) +
+      `${distFromMe(tenant.lon, tenant.lat) != null ? ` · ${fmtDist(distFromMe(tenant.lon, tenant.lat))}` : ''}`;
   return {
     key: `s:${tenant.id}`, kind: 'place',
     lonlat: [tenant.lon, tenant.lat],
@@ -279,8 +352,7 @@ function tenantMarker(tenant) {
     cls: isSelected('tenant', tenant.id) ? 'sel' : '',
     // A local business, not a pin: what it offers for Jiran Credits and how far it is.
     html: `<div class="pl shop" style="--c:${cat.color}"><span class="pl-ic">${icon('store', 14)}</span>` +
-      `<span class="pl-name">${esc(tenant.name)}<small>${esc(shortOffer(tenant.offer))}` +
-      `${distFromMe(tenant.lon, tenant.lat) != null ? ` · ${fmtDist(distFromMe(tenant.lon, tenant.lat))}` : ''}</small></span></div>`,
+      `<span class="pl-name">${esc(tenant.name)}<small>${sub}</small></span></div>`,
     title: `${tenant.name} · ${tenant.offer}`,
     data: tenant.id,
     onClick: (id) => openTenant(id),
@@ -316,6 +388,15 @@ function rideTo(id) {
 }
 
 hooks.buildingExtras = (id) => {
+  if (jiran.admin) {
+    return {
+      body: `<div class="cd-actions"><button class="btn primary" data-act="host">${icon('flag', 16)}Host an SDP event here</button></div>`,
+      actions: {host: () => {
+        const [lon, lat] = world.centroids?.[id] || world.buildingById[id].geometry.coordinates[0][0];
+        setEventSpot({lon, lat, name: placeName(id)});
+      }},
+    };
+  }
   if (!jiran.me || resident(jiran.me)?.home_building === id) return null;
   return {
     body: `<div class="cd-actions"><button class="btn primary" data-act="ride">${icon('car', 16)}Get a ride here</button></div>`,
@@ -346,16 +427,45 @@ function hubMarker(hub) {
 
 function pinHeight(t) { return 16 + Math.min(10, t.credits) * 2.2; }
 
+/** An SDP event: a badge with when it is and how many have joined. */
+function eventMarker(e) {
+  const cat = CATEGORIES.community;
+  const mine = myEventSignup(e);
+  const live = e.status === 'live';
+  return {
+    key: `e:${e.id}`, kind: 'task',
+    lonlat: [e.lon, e.lat], z: groundAt(e.lon, e.lat) + 22,
+    cls: `event ${live ? 'live' : ''} ${mine && !jiran.admin ? 'going' : ''} ${isSelected('event', e.id) ? 'sel' : ''}`,
+    html: `<div class="pe" style="--c:${cat.color}">
+        <span class="pe-head">${icon('flag', 17)}</span>
+        <span class="pe-cr">${e.credits}</span>
+        <span class="pe-tag">${e.start_at == null ? 'Any time' : live ? 'Happening now' : esc(e.when)} · ${e.joined}/${e.slots}</span>
+        ${mine && !jiran.admin ? `<i class="pt-ok">${icon('check', 9)}</i>` : ''}
+        <span class="pt-label">SDP · ${esc(e.title)}</span>
+      </div>`,
+    title: `${e.title} · ${e.when} · ${credits(e.credits)} per volunteer`,
+    data: e.id,
+    onClick: (id) => openEvent(id),
+  };
+}
+
 function syncMarkers() {
   if (!world || !state) return;
   // The spatial demo is its own demo state: only its people and labels are on the map.
   if (spatialActive()) { Markers.sync(spatialMarkers()); return; }
   const specs = [];
-  // Residents can be hidden from the Layers menu; you and anyone on a job stay.
+  // Residents can be hidden (Layers menu, or SDP's Residents chip). A resident still sees
+  // themself and whoever is on their job; SDP hiding residents hides every face.
   for (const p of peopleOnMap()) {
-    if (mapLayers.residents || p.id === jiran.me || p.status === 'moving' || p.status === 'busy') {
+    if (mapLayers.residents || (!jiran.admin && (p.id === jiran.me || p.status === 'moving' || p.status === 'busy'))) {
       specs.push(personMarker(p));
     }
+  }
+  if (jiran.admin && jiran.eventSpot) {
+    const q = jiran.eventSpot;
+    specs.push({key: 'spot', kind: 'place', lonlat: [q.lon, q.lat], z: groundAt(q.lon, q.lat) + 6, cls: 'dest',
+                html: `<div class="pl" style="--c:${CATEGORIES.community.color}"><span class="pl-ic">${icon('flag', 13)}</span>` +
+                  `<span class="pl-name">${esc(q.name)}<small>New event meets here</small></span></div>`});
   }
   specs.push(...landmarkMarkers());
   const d = jiran.draft?.task;
@@ -365,7 +475,10 @@ function syncMarkers() {
                   `<span class="pl-name">${esc(d.dest_name)}<small>Ride destination</small></span></div>`});
   }
   for (const t of liveTasks()) {
-    if (jiran.filter.has(catOf(t))) specs.push(taskMarker(t));
+    if (jiran.filter.has(catOf(t)) && visibleTask(t)) specs.push(taskMarker(t));
+  }
+  if (jiran.filter.has('community')) {
+    for (const e of communityEvents()) if (['upcoming', 'live'].includes(e.status)) specs.push(eventMarker(e));
   }
   if (jiran.filter.has('commercial')) for (const t of world.tenants || []) specs.push(tenantMarker(t));
   if (jiran.filter.has('transit')) for (const h of world.hubs || []) if (h.gateway) specs.push(hubMarker(h));
@@ -408,6 +521,28 @@ function overlayLayers(p, flat) {
     }));
   }
 
+  // -- SDP: who took which request, an arc from the helper to the job ----------------
+  if (jiran.admin && !flat) {
+    const links = liveTasks().filter((t) => t.provider && ['reserved', 'in_progress', 'arrived'].includes(t.status))
+      .map((t) => ({from: personState(t.provider)?.lonlat || [t.lon, t.lat], to: [t.lon, t.lat],
+                    rgb: CATEGORIES[catOf(t)].rgb}))
+      .filter((l) => distanceM(l.from, l.to) > 15);
+    if (links.length) {
+      layers.push(new deck.ArcLayer({
+        id: p('admin-links'),
+        data: links,
+        getSourcePosition: (l) => [l.from[0], l.from[1], groundAt(...l.from) + 4],
+        getTargetPosition: (l) => [l.to[0], l.to[1], groundAt(...l.to) + 4],
+        getSourceColor: (l) => [...l.rgb, 240],
+        getTargetColor: [...RGB.gold, 240],
+        getWidth: 3,
+        getHeight: 0.4,
+        parameters: {depthTest: false},
+        updateTriggers: {getSourcePosition: [state.t]},
+      }));
+    }
+  }
+
   // -- who a request would reach: arcs from neighbours' homes ------------------------
   const rays = matchRays();
   if (rays.length) {
@@ -426,33 +561,62 @@ function overlayLayers(p, flat) {
   }
 
   // -- the thin stem under each floating task pin ---------------------------------
-  const pins = liveTasks().filter((t) => jiran.filter.has(catOf(t)));
+  const pins = liveTasks().filter((t) => jiran.filter.has(catOf(t)) && visibleTask(t))
+    .map((t) => ({...t, at: taskPoint(t)}));
   if (!flat && pins.length) {
     layers.push(new LineLayer({
       id: p('task-stems'),
       data: pins,
-      getSourcePosition: (t) => [t.lon, t.lat, groundAt(t.lon, t.lat)],
-      getTargetPosition: (t) => [t.lon, t.lat, groundAt(t.lon, t.lat) + pinHeight(t)],
+      getSourcePosition: (t) => [t.at[0], t.at[1], groundAt(...t.at)],
+      getTargetPosition: (t) => [t.at[0], t.at[1], groundAt(...t.at) + pinHeight(t)],
       getColor: (t) => [...CATEGORIES[catOf(t)].rgb, 170],
       getWidth: 2,
-      updateTriggers: {getColor: [state.t]},
+      updateTriggers: {getColor: [state.t], getSourcePosition: [jiran.admin], getTargetPosition: [jiran.admin]},
     }));
     layers.push(new ScatterplotLayer({
       id: p('task-feet'),
       data: pins,
-      getPosition: (t) => [t.lon, t.lat, groundAt(t.lon, t.lat) + 0.6],
+      getPosition: (t) => [t.at[0], t.at[1], groundAt(...t.at) + 0.6],
       radiusUnits: 'meters',
       getRadius: 7,
       getFillColor: (t) => [...CATEGORIES[catOf(t)].rgb, 70],
       stroked: false,
       parameters: {depthMask: false},
-      updateTriggers: {getFillColor: [state.t]},
+      updateTriggers: {getFillColor: [state.t], getPosition: [jiran.admin]},
+    }));
+  }
+
+  // -- event stems: SDP events stand a little taller than requests -------------------
+  const evs = jiran.filter.has('community') ? communityEvents().filter((e) => ['upcoming', 'live'].includes(e.status)) : [];
+  if (!flat && evs.length) {
+    layers.push(new LineLayer({
+      id: p('event-stems'),
+      data: evs,
+      getSourcePosition: (e) => [e.lon, e.lat, groundAt(e.lon, e.lat)],
+      getTargetPosition: (e) => [e.lon, e.lat, groundAt(e.lon, e.lat) + 22],
+      getColor: [...CATEGORIES.community.rgb, 190],
+      getWidth: 2,
+    }));
+    layers.push(new ScatterplotLayer({
+      id: p('event-feet'),
+      data: evs,
+      getPosition: (e) => [e.lon, e.lat, groundAt(e.lon, e.lat) + 0.6],
+      radiusUnits: 'meters',
+      getRadius: (e) => (e.status === 'live' ? 26 : 14),
+      getFillColor: [...CATEGORIES.community.rgb, 60],
+      stroked: true, lineWidthUnits: 'pixels', getLineWidth: 1.5,
+      getLineColor: [...CATEGORIES.community.rgb, 160],
+      parameters: {depthMask: false},
+      updateTriggers: {getRadius: [state.t]},
     }));
   }
 
   // -- routes: who is going where --------------------------------------------------
+  // SDP watches every trip; a resident sees only their own, and the one coming to them.
   const sel = selectedMoverId();
-  const travelling = (state.movers || []).filter((m) => m.route?.length > 1);
+  const related = (m) => jiran.admin || m.resident === jiran.me || m.passenger === jiran.me
+    || (m.task_id && taskById(m.task_id)?.requester === jiran.me);
+  const travelling = (state.movers || []).filter((m) => m.route?.length > 1 && related(m));
   if (travelling.length) {
     layers.push(new PathLayer({
       id: p('route-glow'),
@@ -499,7 +663,7 @@ function overlayLayers(p, flat) {
     }
   }
   if (!flat && TripsLayer) {
-    const tracks = (state.movers || [])
+    const tracks = (state.movers || []).filter(related)
       .map((m) => ({id: m.id, mode: m.mode, ...(trails.get(m.id) || {path: [], timestamps: []})}))
       .filter((t) => t.path.length > 1);
     if (tracks.length) {
@@ -542,7 +706,8 @@ function overlayLayers(p, flat) {
 
 function selectionPoint() {
   if (!inspected) return null;
-  if (inspected.kind === 'task') { const t = taskById(inspected.id); return t ? [t.lon, t.lat] : null; }
+  if (inspected.kind === 'task') { const t = taskById(inspected.id); return t ? taskPoint(t) : null; }
+  if (inspected.kind === 'event') { const e = eventById(inspected.id); return e ? [e.lon, e.lat] : null; }
   if (inspected.kind === 'resident') return personState(inspected.id)?.lonlat || null;
   if (inspected.kind === 'tenant') { const t = tenantById(inspected.id); return t ? [t.lon, t.lat] : null; }
   if (inspected.kind === 'hub') return stationEntrance(inspected.id)?.slice(0, 2) || hubById(inspected.id)?.gateway || null;
@@ -564,7 +729,8 @@ function matchRays() {
   if (inspected?.kind === 'task') {
     const d = jiran.taskDetail.get(inspected.id);
     const t = taskById(inspected.id);
-    if (d?.candidates && t?.status === 'open') {
+    // Who a request reaches is the requester's and SDP's to see, not every neighbour's.
+    if (d?.candidates && t?.status === 'open' && (jiran.admin || t.requester === jiran.me)) {
       return d.candidates.slice(0, 5).map((c) => ({from: [c.lon, c.lat], to: [t.lon, t.lat],
                                                    score: Math.min(1, c.score)}));
     }
@@ -596,7 +762,8 @@ hooks.tooltip.push(({object, layer}) => {
     if (tenant) {
       return {html: `<div class="tt-name">${esc(tenant.name)}</div><div class="tt-row">${esc(tenant.offer)}</div>`};
     }
-    const living = jiran.residents.filter((r) => r.home_building === object.id);
+    const living = jiran.residents.filter((r) => r.home_building === object.id
+      && (jiran.admin || r.id === jiran.me));
     if (living.length) {
       return {html: `<div class="tt-name">${living.map((r) => esc(r.name.split(' ')[0])).join(', ')}</div>` +
         `<div class="tt-row">${living.some((r) => r.id === jiran.me) ? 'Your home' : 'Neighbour’s home'}</div>`};
@@ -609,7 +776,8 @@ hooks.click.push((info) => {
   if (info.layer.id.endsWith('-buildings')) {
     const tenant = tenantByBuilding()[info.object.id];
     if (tenant) { openTenant(tenant.id); return true; }
-    const living = jiran.residents.find((r) => r.home_building === info.object.id);
+    const living = jiran.residents.find((r) => r.home_building === info.object.id
+      && (jiran.admin || r.id === jiran.me));
     if (living) { openResident(living.id); return true; }
   }
   return false;
@@ -618,12 +786,49 @@ hooks.click.push((info) => {
 /* ---------------------------------------------------------------- selection */
 
 function openTask(id, fly = false) {
+  jiran.profileFrom = null;
   const t = taskById(id);
   if (!t) return;
-  inspect('task', id, [t.lon, t.lat, groundAt(t.lon, t.lat) + pinHeight(t)]);
+  const [lon, lat] = taskPoint(t);
+  inspect('task', id, [lon, lat, groundAt(lon, lat) + pinHeight(t)]);
   loadTaskDetail(id);
-  if (fly) focusOn([[t.lon, t.lat]], {maxZoom: 17});
+  if (fly) focusOn([[lon, lat]], {maxZoom: 17});
   afterSelect();
+}
+
+function openEvent(id, fly = false) {
+  jiran.profileFrom = null;
+  const e = eventById(id);
+  if (!e) return;
+  inspect('event', id, [e.lon, e.lat, groundAt(e.lon, e.lat) + 22]);
+  if (fly) focusOn([[e.lon, e.lat]], {maxZoom: 16.8});
+  afterSelect();
+}
+
+/* SDP: where a new event meets. Picked from a building's card, a landmark, or the map. */
+function setEventSpot(spot) {
+  jiran.eventSpot = spot;
+  jiran.picking = false;
+  hooks.pickPoint = null;
+  document.body.classList.remove('picking');
+  closeInspector();
+  jiran.view = 'events';
+  renderLeft(true);
+  syncMarkers();
+  if (spot) focusOn([[spot.lon, spot.lat]], {maxZoom: 16.8});
+}
+
+function pickEventSpot() {
+  jiran.picking = true;
+  document.body.classList.add('picking');
+  toast('Click the map where volunteers should meet');
+  hooks.pickPoint = ([lon, lat]) => {
+    const name = township.landmarks
+      .map((m) => ({m, d: distanceM([lon, lat], m.lonlat)})).sort((a, b) => a.d - b.d)
+      .find((q) => q.d < 160)?.m.name;
+    setEventSpot({lon, lat, name: name ? `Near ${name}` : 'Picked on the map'});
+    return true;
+  };
 }
 
 function openResident(id, fly = false) {
@@ -635,6 +840,7 @@ function openResident(id, fly = false) {
 }
 
 function openTenant(id, fly = false) {
+  jiran.profileFrom = null;
   const tenant = tenantById(id);
   if (!tenant) return;
   const b = world.buildingById[tenant.building];
@@ -644,6 +850,7 @@ function openTenant(id, fly = false) {
 }
 
 function openHub(id, fly = false) {
+  jiran.profileFrom = null;
   const hub = hubById(id);
   if (!hub?.gateway) return;
   // The card points at the station itself when it is built; otherwise at the gateway.
@@ -682,18 +889,31 @@ hooks.inspector = (ins) => {
   if (ins.kind === 'resident') return residentCard(ins.id);
   if (ins.kind === 'tenant') return tenantCard(ins.id);
   if (ins.kind === 'hub') return hubCard(ins.id);
+  if (ins.kind === 'event') return eventCard(ins.id);
   return null;   // a plain building: the map core's own panel
 };
 
 /* -------------------------------------------------------------- data refresh */
 
 async function refreshMe() {
+  if (jiran.admin) { renderHeaderMe(); renderLeft(); refreshTenantStats(); return; }
   if (!jiran.me) return;
   try {
     jiran.meData = await api(`/api/me?resident=${encodeURIComponent(jiran.me)}`);
     renderHeaderMe();
     renderWallet();
     renderLeft();
+  } catch (err) { /* transient */ }
+}
+
+/** SDP: what each shop has collected, for the map labels and the Merchants list. */
+async function refreshTenantStats() {
+  if (!jiran.admin) return;
+  try {
+    const list = await api('/api/tenants');
+    jiran.tenantStats = Object.fromEntries(list.map((t) => [t.id, t]));
+    syncMarkers();
+    if (jiran.view === 'merchants') renderLeft(true);
   } catch (err) { /* transient */ }
 }
 
@@ -704,14 +924,30 @@ async function refreshResidents() {
 }
 
 async function signIn(id) {
-  jiran.me = id;
-  storageSet('jiransync.me', id);
+  const admin = id === ADMIN_ID;
+  const switched = admin !== jiran.admin;
+  jiran.admin = admin;
+  if (!admin) {
+    jiran.me = id;
+    storageSet('jiransync.me', id);
+  }
+  storageSet('jiransync.admin', admin ? '1' : '0');
+  document.body.classList.toggle('admin', admin);
   jiran.draft = null;
+  jiran.eventSpot = null;
+  if (switched) {
+    jiran.view = admin ? 'live' : 'home';
+    renderShell();
+  }
+  if (admin) setRight(false);
+  else if (switched) setRight(window.innerWidth >= 1440);
   closeInspector();
   await refreshMe();
   renderAsk();
+  renderLeft(true);
   syncMarkers();
   redraw();
+  if (admin) { if (deckgl) resetCamera(); return; }
   const home = myHome();
   if (home && deckgl) frameNeighbourhood();
 }
@@ -770,8 +1006,13 @@ function setDev(on) {
 
 hooks.ready.push(async () => {
   jiran.me = storageGet('jiransync.me') || 'R001';
-  const asked = new URLSearchParams(location.search).get('dev');
-  setDev(asked === '1' || (asked !== '0' && storageGet('jiransync.dev') === '1'));
+  const params = new URLSearchParams(location.search);
+  jiran.admin = params.get('admin') === '1' || (params.get('admin') !== '0' && storageGet('jiransync.admin') === '1');
+  document.body.classList.toggle('admin', jiran.admin);
+  if (jiran.admin) jiran.view = 'live';
+  const asked = params.get('dev');
+  // Developer mode belongs to the SDP side; a resident never sees it.
+  setDev(jiran.admin && (asked === '1' || (asked !== '0' && storageGet('jiransync.dev') === '1')));
   Markers.init($('markers'));
   renderShell();
   // While a card is open and docked, the right column steps back behind it.
@@ -787,15 +1028,30 @@ hooks.ready.push(async () => {
   await refreshResidents();
   await refreshMe();
   renderAsk();
+  if (jiran.admin) setRight(false);
 });
 
 /* Tell the requester when a neighbour picks their request up -- by hand, or by the demo's
  * auto-accept. Remembered per task, so each change is announced once. */
 const seenStatus = new Map();
+const seenOffers = new Map();
 function announceMatches(s) {
+  if (jiran.admin) return;
   for (const t of s.tasks || []) {
+    // A new offer on your request, or the requester choosing you.
+    const offers = (t.offers || []).filter((o) => o.status === 'offered').map((o) => o.resident);
+    const had = seenOffers.get(t.id);
+    seenOffers.set(t.id, offers);
+    if (had && t.requester === jiran.me) {
+      const fresh = offers.filter((r) => !had.includes(r));
+      if (fresh.length) toast(`${firstName(fresh[0])} offered to help with “${t.title}” — tap to choose`);
+    }
     const before = seenStatus.get(t.id);
     seenStatus.set(t.id, t.status);
+    if (before === 'open' && t.provider === jiran.me && t.requester !== jiran.me && t.offers_mode) {
+      toast(`${firstName(t.requester)} chose you for “${t.title}”${t.status === 'reserved' ? ` · ${whenOf(t)}` : ''}`);
+      continue;
+    }
     if (before !== 'open' || t.requester !== jiran.me || !t.provider) continue;
     if (t.status === 'reserved') toast(`${firstName(t.provider)} confirmed your booking for ${whenOf(t)}`);
     else if (t.status === 'in_progress') toast(`${firstName(t.provider)} accepted “${t.title}” and is on the way`);
@@ -811,7 +1067,7 @@ hooks.snapshot.push((s) => {
   renderDevBar();
   if (!jiran.framed && jiran.residents.length) {
     jiran.framed = true;
-    setTimeout(frameNeighbourhood, 400);
+    if (!jiran.admin) setTimeout(frameNeighbourhood, 400);
   }
   // Keep a moving neighbour's card pinned to them.
   if (inspected?.kind === 'resident') {
@@ -820,6 +1076,7 @@ hooks.snapshot.push((s) => {
   }
   if (fresh) {
     refreshMe();
+    if (inspected?.kind === 'event') renderInspector(true);
     if (inspected?.kind === 'task') loadTaskDetail(inspected.id);
     // Balances and helping records change as jobs close, not only when people join.
     refreshResidents();

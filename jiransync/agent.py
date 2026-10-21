@@ -88,8 +88,9 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
                  "teach", "lesson", "revision"),
     "tech help": ("computer", "laptop", "phone", "wifi", "router", "printer",
                   "email", "app", "online banking", "setup my"),
-    "childcare": ("babysit", "kids", "child", "pick up my son", "pick up my daughter",
-                  "school pickup", "nanny"),
+    "childcare": ("babysit", "baby", "kids", "child", "pick up my son", "pick up my daughter",
+                  "look after my son", "look after my daughter", "school pickup", "nanny",
+                  "jaga anak"),
     "eldercare": ("elderly", "grandma", "grandpa", "my mother", "my father", "nenek",
                   "atuk", "clinic appointment", "accompany"),
     "pet care": ("dog", "cat", "pet", "walk my", "feed my"),
@@ -150,6 +151,21 @@ DAYS = {
     "wednesday": "Wed", "thursday": "Thu", "friday": "Fri", "saturday": "Sat",
     "sunday": "Sun", "weekday": "Weekdays",
 }
+
+
+def _duration(text: str) -> int | None:
+    """Minutes the resident said the job takes: "for an hour", "2 hours", "30 min"."""
+    if re.search(r"\bhalf an? hour\b", text):
+        return 30
+    if re.search(r"\b(an|one) hour\b", text):
+        return 60
+    m = re.search(r"\b(\d+(?:\.\d+)?)\s*(hours?|hrs?)\b", text)
+    if m:
+        return int(round(float(m.group(1)) * 60))
+    m = re.search(r"\b(\d+)\s*(minutes?|mins?)\b", text)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def _when(text: str, slot: str | None) -> str | None:
@@ -237,6 +253,10 @@ def rules(text: str, hubs: list[dict] | None = None) -> Understanding:
     level = 2 if EXPERT_SKILLS & set(skills) else (1 if SKILLED_SKILLS & set(skills) else 0)
     minutes = sum(t.est_minutes for t in subtasks) if len(subtasks) > 1 else max(
         MINUTES.get(s, 30) for s in skills)
+    # A length the resident states beats the typical one for the skill.
+    said = _duration(low)
+    if said and len(subtasks) < 2:
+        minutes = min(480, max(10, said))
     if len(subtasks) < 2:
         subtasks = []
     return Understanding(

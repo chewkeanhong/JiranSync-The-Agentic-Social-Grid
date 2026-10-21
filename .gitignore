@@ -228,3 +228,6 @@ data/raw/
 # Community state: residents, tasks and the credit ledger. Seeded on first start.
 data/jiransync*.db
 data/jiransync*.db-*
+
+# Local MCP config (Playwright browser for Claude Code)
+.mcp.json

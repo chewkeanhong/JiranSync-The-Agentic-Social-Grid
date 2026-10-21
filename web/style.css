@@ -1071,3 +1071,277 @@ body.right-open.card-open .panel-right { opacity: 0; pointer-events: none; }
 .mk-place.hub .pl-name, .mk-place.dest .pl-name { flex-direction: column; align-items: flex-start; gap: 0; line-height: 1.15; }
 .mk-place.hub .pl-name small, .mk-place.dest .pl-name small { font-size: 9.5px; font-weight: 600; color: var(--ink-3); }
 .mk-place.hub .pl-name em { order: 0; }
+
+/* ------------------------------------------------- resident view and SDP admin view */
+
+/* SDP admin has no wallet: the right column and its toggle are a resident's. */
+body.admin #right, body.admin #right-toggle { display: none !important; }
+body.picking #map { cursor: crosshair; }
+
+.mm-admin { margin-bottom: 4px; }
+.mm-admin .sdp-av { flex: none; }
+.mm-sub { padding: 8px 8px 4px; font-size: 10.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .08em; border-top: 1px solid var(--line); }
+
+/* The Credits rail button lands visibly: the wallet lights up. */
+.wallet-card.flash { animation: wallet-flash 1.3s ease; }
+@keyframes wallet-flash {
+  0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); transform: none; }
+  25% { box-shadow: 0 0 0 4px rgba(52, 211, 153, .65), 0 0 36px rgba(52, 211, 153, .5); transform: scale(1.015); }
+  100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); transform: none; }
+}
+
+/* A request JiranSync picked you for: a gold ring and a tag on the pin. */
+.pt-for {
+  position: absolute; left: 50%; top: calc(100% + 2px); transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px; border-radius: 999px; white-space: nowrap;
+  font-size: 10px; font-weight: 750; color: #3b2a00; background: linear-gradient(145deg, #fde68a, #fbbf24);
+  box-shadow: 0 0 0 2px #0b1220, 0 4px 12px rgba(251, 191, 36, .45); pointer-events: none;
+}
+.mk-task.for-you .pt-head { border-color: #fde68a; box-shadow: 0 0 0 3px rgba(251, 191, 36, .45), 0 0 26px rgba(251, 191, 36, .55), 0 8px 18px rgba(0, 0, 0, .45); }
+.tcard.for-you { border-color: rgba(251, 191, 36, .5); background: linear-gradient(135deg, rgba(251, 191, 36, .1), var(--glass-2) 55%); }
+.for-you-tag { display: inline-flex; align-items: center; gap: 3px; color: var(--gold); font-weight: 700; }
+
+/* SDP event pin: a rounded badge with a flag, its reward, and when / how many going. */
+.pe {
+  position: relative; width: 42px; height: 42px;
+  transform: translate(-50%, -100%) scale(var(--mk-scale)); transform-origin: 50% 100%;
+  transition: transform .18s ease;
+}
+.pe-head {
+  position: absolute; inset: 0; display: grid; place-items: center; border-radius: 13px; color: #fff;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--c) 70%, white), var(--c) 60%, #0d9488);
+  border: 2px solid rgba(255, 255, 255, .9);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--c) 60%, transparent), 0 8px 18px rgba(0, 0, 0, .45);
+}
+.pe-cr {
+  position: absolute; right: -9px; top: -8px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px;
+  display: grid; place-items: center; font-size: 11px; font-weight: 800; color: #3b2a00;
+  background: linear-gradient(145deg, #fde68a, #fbbf24); box-shadow: 0 0 0 2px #0b1220;
+}
+.pe-tag {
+  position: absolute; left: 50%; top: calc(100% + 4px); transform: translateX(-50%);
+  padding: 2px 8px; border-radius: 999px; white-space: nowrap; font-size: 10.5px; font-weight: 700;
+  background: rgba(6, 10, 19, .9); border: 1px solid color-mix(in srgb, var(--c) 55%, transparent); color: #a7f3d0;
+}
+.pe .pt-ok { right: -6px; top: 26px; }
+.mk-task.event:hover .pe { transform: translate(-50%, -100%) scale(calc(var(--mk-scale) * 1.12)); }
+.mk-task.event:hover .pt-label, .mk-task.event.sel .pt-label { opacity: 1; }
+.mk-task.event.sel .pe { transform: translate(-50%, -100%) scale(calc(var(--mk-scale) * 1.22)); }
+.mk-task.event.live .pe::before {
+  content: ""; position: absolute; inset: -7px; border-radius: 18px; border: 2px solid var(--c);
+  animation: ring-pulse 1.8s ease-out infinite;
+}
+.mk-task.event.going .pe-head { border-color: #fde68a; }
+
+/* Stat tiles */
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 7px; margin: 12px 0 4px; }
+.stat { padding: 10px 10px 9px; border-radius: 13px; background: var(--glass-2); border: 1px solid var(--line); }
+.stat b { display: block; font-size: 19px; font-weight: 800; letter-spacing: -.01em; }
+.stat span { display: block; margin-top: 2px; font-size: 11px; line-height: 1.25; color: var(--ink-3); }
+.stat.gold b { color: var(--gold); }
+
+.ecard.live { border-color: rgba(52, 211, 153, .5); }
+.live-dot { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: var(--brand-2); box-shadow: 0 0 0 3px rgba(52, 211, 153, .25); vertical-align: 1px; }
+
+/* SDP lists: requests with who asked and who took them; merchants */
+.alist { display: flex; flex-direction: column; gap: 6px; }
+.arow, .mrow {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border-radius: 13px; text-align: left;
+  background: var(--glass-2); border: 1px solid var(--line); animation: slide-in .25s ease both;
+}
+.arow:hover, .mrow:hover { border-color: var(--line-2); background: rgba(30, 41, 66, .85); cursor: pointer; }
+.arow-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.arow-main b { font-size: 13px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.arow-main em { font-style: normal; font-size: 11.5px; color: var(--ink-2); }
+.arow-who { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-2); white-space: nowrap; overflow: hidden; }
+.arow-who .ico { color: var(--ink-3); }
+.arow-who em { font-style: normal; }
+.st-reserved { color: #c4b5fd; }
+.st-cancelled { color: var(--danger); }
+
+/* SDP event form */
+.ev-form { margin-top: 12px; padding: 12px; border-radius: 16px; background: var(--glass-2); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.fl { display: flex; flex-direction: column; gap: 5px; }
+.fl > span { font-size: 11px; font-weight: 650; color: var(--ink-3); text-transform: uppercase; letter-spacing: .06em; }
+.ev-form { --field-h: 38px; color-scheme: dark; }
+.ev-form input, .ev-form textarea, .ev-form select {
+  width: 100%; min-width: 0; height: var(--field-h); padding: 0 11px; border-radius: 10px; font-size: 13px;
+  background: rgba(6, 10, 19, .6); border: 1px solid var(--line-2); color: var(--ink);
+  transition: border-color .15s, background-color .15s;
+}
+.ev-form textarea { height: auto; min-height: 64px; padding: 9px 11px; line-height: 1.45; resize: vertical; }
+.ev-form input::placeholder, .ev-form textarea::placeholder { color: var(--ink-3); }
+.ev-form input:hover:not(:disabled), .ev-form textarea:hover, .ev-form select:hover { border-color: rgba(148, 163, 184, .4); }
+.ev-form input:focus-visible, .ev-form textarea:focus-visible, .ev-form select:focus-visible {
+  outline: none; border-color: var(--brand-2); background-color: rgba(6, 10, 19, .85);
+}
+/* Selects draw their own chevron in the panel's ink, not the browser's white one. */
+.ev-form select {
+  appearance: none; -webkit-appearance: none; padding-right: 32px; cursor: pointer; text-overflow: ellipsis;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23a9b4c8' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 11px center;
+}
+.ev-form select option { background: #0b1220; color: var(--ink); }
+/* The time field keeps the native picker, lit for a dark panel. */
+.ev-form input[type=time] { font-variant-numeric: tabular-nums; padding-right: 6px; }
+.ev-form input[type=time]::-webkit-calendar-picker-indicator { opacity: .7; cursor: pointer; }
+.ev-form input[type=time]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
+.where { display: flex; gap: 6px; align-items: center; }
+.where select { flex: 1; }
+.where .btn { flex: none; height: var(--field-h); padding: 0 12px; border-radius: 10px; }
+.when { display: grid; grid-template-columns: 1fr 1.25fr 0.9fr; gap: 6px; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+/* The one-off checkbox: a drawn box in the brand colour, not the browser's white square. */
+.chk { display: flex; align-items: center; gap: 9px; min-height: 28px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; user-select: none; }
+.chk:hover { color: var(--ink); }
+.ev-form .chk input {
+  appearance: none; -webkit-appearance: none; flex: none; width: 18px; height: 18px; padding: 0; margin: 0;
+  border-radius: 5px; border: 1.5px solid rgba(148, 163, 184, .5); background: rgba(6, 10, 19, .6);
+  display: grid; place-items: center; cursor: pointer;
+}
+.ev-form .chk input::after {
+  content: ""; width: 9px; height: 5px; margin-top: -2px; border: solid #04140e; border-width: 0 0 2px 2px;
+  transform: rotate(-45deg) scale(0); transition: transform .14s cubic-bezier(.2, .8, .2, 1);
+}
+.ev-form .chk input:checked { background: var(--brand-2); border-color: var(--brand-2); }
+.ev-form .chk input:checked::after { transform: rotate(-45deg) scale(1); }
+.ev-form .chk input:focus-visible { outline: 2px solid var(--brand-2); outline-offset: 2px; }
+.hint { font-style: normal; font-size: 11.5px; color: var(--ink-3); display: flex; align-items: center; gap: 4px; }
+.hint b { color: var(--brand-2); }
+.hint .ico { color: var(--brand-2); }
+
+/* Event card */
+.slots-bar { margin: 8px 0 10px; }
+.slots-bar > div { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-2); margin-bottom: 5px; }
+.slots-bar > div b { color: var(--gold); }
+.slots-bar i { display: block; height: 7px; border-radius: 99px; background: rgba(148, 163, 184, .18); overflow: hidden; position: relative; }
+.slots-bar i::after { content: ""; position: absolute; inset: 0; width: var(--w); border-radius: inherit; background: linear-gradient(90deg, var(--brand-2), var(--sky)); }
+.signups { display: flex; flex-direction: column; gap: 3px; margin: 4px 0 10px; max-height: 190px; overflow-y: auto; }
+.su { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border: 0; border-radius: 9px; background: transparent; text-align: left; font-size: 12.5px; }
+.su:hover { background: var(--glass-3); }
+.su b { flex: 1; font-weight: 600; }
+.su .st { font-size: 11px; }
+.going { display: flex; align-items: center; gap: 7px; margin: 2px 0 10px; font-size: 12.5px; color: var(--ink-2); }
+.going .ico { color: var(--brand-2); }
+
+/* Economy */
+.ledger-check { display: flex; gap: 10px; align-items: flex-start; margin: 12px 0 6px; padding: 11px 12px; border-radius: 14px; border: 1px solid; }
+.ledger-check.ok { border-color: rgba(52, 211, 153, .4); background: rgba(16, 185, 129, .08); }
+.ledger-check.ok > .ico { color: var(--brand-2); }
+.ledger-check.bad { border-color: rgba(248, 113, 113, .5); background: rgba(248, 113, 113, .08); }
+.ledger-check span { display: flex; flex-direction: column; gap: 2px; }
+.ledger-check em { font-style: normal; font-size: 12px; color: var(--ink-2); line-height: 1.4; }
+.rules { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.rules > div { display: flex; gap: 9px; align-items: flex-start; padding: 8px 10px; border-radius: 12px; background: var(--glass-2); font-size: 12.5px; color: var(--ink-2); line-height: 1.4; }
+.rules .ico { color: var(--brand-2); margin-top: 1px; }
+.rules b { color: var(--ink); }
+
+/* The SDP badge in the header: centred like a logo, not laid out like a photo avatar. */
+#me-avatar .av.sdp-av { display: grid; box-shadow: 0 0 0 2px rgba(255, 255, 255, .12), 0 4px 14px rgba(14, 165, 233, .35); }
+.credits-num.admin-sub { color: var(--ink-2); font-weight: 600; font-size: 12px; }
+
+/* Number fields with themed − / + buttons instead of the browser's spinner. */
+.stepper { display: flex; align-items: stretch; height: var(--field-h, 38px); border-radius: 10px; border: 1px solid var(--line-2); background: rgba(6, 10, 19, .6); overflow: hidden; }
+.stepper:focus-within { border-color: var(--brand-2); }
+.ev-form .stepper input {
+  flex: 1; height: 100%; padding: 0 4px; border: 0; border-radius: 0; background: transparent;
+  text-align: center; font-weight: 700; font-size: 14px; font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield; appearance: textfield;
+}
+.ev-form .stepper input:focus-visible { background: transparent; }
+.stepper input::-webkit-inner-spin-button, .stepper input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.stepper button {
+  width: 36px; flex: none; display: grid; place-items: center; border: 0; color: var(--ink-2);
+  background: transparent; transition: background .15s, color .15s;
+}
+.stepper button:first-child { border-right: 1px solid var(--line); }
+.stepper button:last-child { border-left: 1px solid var(--line); }
+.stepper button:hover:not(:disabled) { background: rgba(52, 211, 153, .14); color: var(--brand-2); }
+.stepper button:active:not(:disabled) { background: rgba(52, 211, 153, .24); }
+.stepper button:focus-visible { outline: 2px solid var(--brand-2); outline-offset: -2px; }
+.stepper.off { opacity: .55; }
+
+/* Keyboard focus, everywhere: a brand ring that only shows for the keyboard, never on click. */
+.btn:focus-visible, .rail-btn:focus-visible, .cat:focus-visible, .tcard:focus-visible, .arow:focus-visible,
+.icon-btn:focus-visible, .mm-row:focus-visible { outline: 2px solid var(--brand-2); outline-offset: 2px; }
+
+/* SDP's Residents toggle, set apart from the category chips it sits beside. */
+.cat-sep { width: 1px; align-self: stretch; margin: 6px 4px; background: var(--line-2); }
+.cat.people.on { color: #04140e; background: linear-gradient(135deg, var(--brand-2), var(--brand)); border-color: transparent; }
+.cat.people:not(.on) { color: var(--ink-3); }
+.cat.people:not(.on) .ico { opacity: .6; }
+
+/* ------------------------------------------------------- offers, and who you know */
+
+/* What connects a neighbour to you: a past favour, a new face, something you share. */
+.ties { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.tie {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 650; font-style: normal; line-height: 1.5; white-space: nowrap;
+}
+.tie.known { color: #fde68a; background: rgba(251, 191, 36, .12); }
+.tie.new { color: #6ee7b7; background: rgba(52, 211, 153, .13); }
+.tie.shared { color: #93c5fd; background: rgba(79, 157, 255, .13); }
+.cand-main .ties { margin-top: 4px; }
+
+/* The requester's offers: one row each, the recommended one lit. */
+.offers { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 10px; }
+.offer {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 10px;
+  padding: 9px 10px; border-radius: 13px;
+  background: var(--glass-2); border: 1px solid var(--line);
+  animation: slide-in .3s cubic-bezier(.2, .8, .2, 1) both;
+}
+.offer.rec { border-color: rgba(52, 211, 153, .5); background: linear-gradient(135deg, rgba(52, 211, 153, .1), var(--glass-2) 60%); }
+.offer-who { padding: 0; border: 0; background: none; border-radius: 50%; flex: none; }
+.offer-who:focus-visible { outline: 2px solid var(--brand-2); outline-offset: 2px; }
+.offer-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.offer-name { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.offer-name b { font-size: 13px; font-weight: 650; }
+.offer-main > em { font-style: normal; font-size: 11.5px; color: var(--ink-2); }
+.rec-tag {
+  display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px; border-radius: 999px;
+  font-size: 10px; font-weight: 750; color: #04140e; background: linear-gradient(135deg, var(--brand-2), var(--brand));
+}
+.offer .btn { flex: none; }
+.offers-empty {
+  display: flex; align-items: center; gap: 10px; margin: 4px 0 10px; padding: 10px 12px; border-radius: 13px;
+  background: var(--glass-2); border: 1px dashed var(--line-2); color: var(--ink-2); font-size: 12px;
+}
+.offers-empty > .ico { color: var(--gold); flex: none; }
+.offers-empty > div { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.offers-empty b { color: var(--ink); font-size: 12.5px; }
+.offer > .ties { grid-column: 1 / -1; margin-top: 7px; }
+.tie { white-space: normal; }
+
+/* Pinged neighbours who haven't replied yet: in the list, quieter, no Choose. */
+.offer.waiting { opacity: .78; }
+.offer.waiting.rec { opacity: 1; }
+.asked {
+  display: inline-flex; align-items: center; gap: 4px; padding: 4px 9px; border-radius: 999px;
+  font-size: 11px; font-weight: 650; color: var(--ink-3); background: rgba(148, 163, 184, .1); white-space: nowrap;
+}
+.offers-note { margin: -4px 0 10px; font-size: 11.5px; color: var(--ink-3); }
+
+/* The draft's When / How long: the two things a neighbour needs before saying yes. */
+.dfields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 2px 0 10px; padding: 0; background: none; border: 0; }
+.dfields > .fl:first-child { grid-column: 1 / -1; }
+.dwhen { display: flex; gap: 6px; }
+.dwhen select { flex: 1.3; }
+.dwhen input { flex: 1; min-width: 118px; }
+.dfields .req { font-style: normal; color: var(--gold); text-transform: none; letter-spacing: 0; }
+.dfields.needs #d-day { border-color: rgba(251, 191, 36, .6); }
+
+/* An offer row opens the neighbour's profile; only Choose chooses. */
+.offer-main { padding: 0; border: 0; background: none; text-align: left; cursor: pointer; border-radius: 8px; }
+.offer-main:hover b { text-decoration: underline; text-underline-offset: 3px; }
+.offer-main:focus-visible { outline: 2px solid var(--brand-2); outline-offset: 3px; }
+.offer-more { display: inline-flex; align-items: center; gap: 2px; margin-top: 2px; font-size: 11px; font-weight: 650; color: var(--brand-2); }
+.offer-main > .offer-name { display: flex; }
+
+/* The profile, opened from your offers: how they fit, at the top. */
+.rc-fit { margin: 10px 0 8px; padding: 10px 12px; border-radius: 13px; background: var(--glass-2); border: 1px solid var(--line); }
+.rc-fit.rec { border-color: rgba(52, 211, 153, .5); background: linear-gradient(135deg, rgba(52, 211, 153, .1), var(--glass-2) 60%); }
+.rc-fit .rc-sec { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 4px; }
+.rc-fit > em { display: block; font-style: normal; font-size: 12px; color: var(--ink-2); }
+.ico.flip { transform: scaleX(-1); }

@@ -5,12 +5,13 @@ The rules, in one place:
 * Peer-to-peer is **zero-sum**. A resident can only pay with credits they hold; helping a
   neighbour moves credits, it never creates them.
 * Credits enter circulation two ways only, both issued by SDP from ``sdp:mint``: the
-  seed grant a verified resident gets on joining, and developer-sponsored bounties.
+  seed grant a verified resident gets on joining, and the reward for volunteering at an
+  SDP community event, paid to each volunteer GPS checked in at the venue.
 * A task's reward is locked in ``escrow:<task>`` when someone accepts it, released to the
   provider on completion, and refunded on cancellation or a no-show.
-* Tenants accept credits as a discount (1 credit = RM2 off) and hand them back to SDP for
-  a rent rebate, **capped at 5% of their monthly rent**. Credits above the cap stay with
-  the tenant; they are not paid out.
+* Tenants accept credits as a discount (1 credit = RM2 off) and cash them out with SDP at
+  the same rate: every credit a shop collected is handed back to SDP's treasury, and SDP
+  pays the shop RM2 for it.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from .store import Store
 
 SEED_GRANT = 3
 RM_PER_CREDIT = 2.0
-REBATE_CAP = 0.05
 
 MINT = "sdp:mint"
 TREASURY = "sdp:treasury"
@@ -51,15 +51,12 @@ def grant_seed(store: Store, resident_id: str, t: float = 0.0) -> None:
 
 
 def lock_escrow(store: Store, task: dict, t: float) -> None:
-    """Lock a task's reward. Peer tasks are paid by the requester; bounties by SDP."""
+    """Lock a task's reward, paid by the requester."""
     escrow = escrow_account(task["id"])
     amount = int(task["credits"])
     with store.transaction():
         if store.balance(escrow) > 0:
             raise CreditError(f"{task['id']} already has credits in escrow")
-        if task["kind"] == "bounty":
-            store.post(t, "bounty", MINT, escrow, amount, task["id"], "SDP bounty issued")
-            return
         payer = task["requester"]
         held = store.balance(payer)
         if held < amount:
@@ -84,13 +81,24 @@ def release(store: Store, task: dict, t: float) -> int:
 def refund(store: Store, task: dict, t: float, memo: str = "refunded") -> int:
     """Return escrow to whoever funded it. A no-op if nothing is locked."""
     escrow = escrow_account(task["id"])
-    payer = MINT if task["kind"] == "bounty" else task["requester"]
     with store.transaction():
         amount = store.balance(escrow)
         if amount <= 0:
             return 0
-        store.post(t, "refund", escrow, payer, amount, task["id"], memo)
+        store.post(t, "refund", escrow, task["requester"], amount, task["id"], memo)
     return amount
+
+
+def pay_volunteer(store: Store, event: dict, resident_id: str, t: float) -> int:
+    """SDP mints an event's reward to one volunteer. Paid once per event and person."""
+    with store.transaction():
+        already = store.execute("SELECT 1 FROM ledger WHERE kind = 'event' AND task_id = ? "
+                                "AND credit = ?", (event["id"], resident_id)).fetchone()
+        if already:
+            raise CreditError(f"{resident_id} was already paid for {event['id']}")
+        store.post(t, "event", MINT, resident_id, int(event["credits"]), event["id"],
+                   f"SDP event: {event['title']}")
+    return int(event["credits"])
 
 
 def redeem(store: Store, resident_id: str, tenant: dict, credits: int, t: float) -> float:
@@ -108,31 +116,15 @@ def redeem(store: Store, resident_id: str, tenant: dict, credits: int, t: float)
     return discount
 
 
-def rebate_claimed_rm(store: Store, tenant_id: str, month: str) -> float:
-    row = store.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS c FROM ledger "
-        "WHERE kind = 'rebate' AND debit = ? AND memo LIKE ?",
-        (tenant_account(tenant_id), f"rebate {month}%")).fetchone()
-    return int(row["c"]) * RM_PER_CREDIT
-
-
-def claim_rebate(store: Store, tenant: dict, month: str, t: float) -> dict:
-    """Hand collected credits back to SDP for a rent rebate, up to the 5% cap.
-
-    Only as many credits as fit under the cap move; the rest stay with the tenant for
-    next month. Returns what moved and what the cap left over.
-    """
+def cash_out(store: Store, tenant: dict, t: float) -> dict:
+    """A shop hands every credit it has collected back to SDP, which pays RM2 each."""
     account = tenant_account(tenant["id"])
-    cap_rm = REBATE_CAP * float(tenant["monthly_rent_rm"])
     with store.transaction():
         held = store.balance(account)
-        headroom_rm = max(0.0, cap_rm - rebate_claimed_rm(store, tenant["id"], month))
-        credits = min(held, int(headroom_rm // RM_PER_CREDIT))
-        if credits > 0:
-            store.post(t, "rebate", account, TREASURY, credits,
-                       memo=f"rebate {month}: RM{credits * RM_PER_CREDIT:.2f} off rent")
-    return {"credits": credits, "rebate_rm": credits * RM_PER_CREDIT, "cap_rm": cap_rm,
-            "held_over": held - credits}
+        if held > 0:
+            store.post(t, "cashout", account, TREASURY, held,
+                       memo=f"cash-out: RM{held * RM_PER_CREDIT:.2f} paid by SDP")
+    return {"credits": held, "rm": held * RM_PER_CREDIT}
 
 
 def circulating(store: Store) -> int:

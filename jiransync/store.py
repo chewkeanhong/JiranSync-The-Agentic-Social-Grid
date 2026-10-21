@@ -10,8 +10,8 @@ Accounts are plain strings:
 * ``escrow:<task id>`` credits locked against one task
 * ``tenant:<id>``      credits a commercial tenant has collected
 * ``sdp:mint``         SDP's issuing account; it runs negative by exactly the credits in
-                       circulation (seed grants and bounties are the only way in)
-* ``sdp:treasury``     credits tenants have handed back for their rent rebate
+                       circulation (seed grants and SDP event rewards are the only way in)
+* ``sdp:treasury``     credits shops have cashed out with SDP
 """
 
 from __future__ import annotations
@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     start_at     REAL,
     source       TEXT NOT NULL DEFAULT 'rules',
     valuation    TEXT NOT NULL DEFAULT '{}',
+    pinged       TEXT NOT NULL DEFAULT '[]',
     created_t    REAL NOT NULL DEFAULT 0,
     updated_t    REAL NOT NULL DEFAULT 0
 );
@@ -107,7 +108,45 @@ CREATE TABLE IF NOT EXISTS events (
     kind    TEXT NOT NULL,
     text    TEXT NOT NULL,
     task_id TEXT,
-    actor   TEXT
+    actor   TEXT,
+    public  TEXT
+);
+
+-- SDP community events: a clean-up, a gotong-royong, or a one-off civic job (one slot,
+-- any time). Volunteers join, GPS checks them in at the venue, and SDP pays at the end.
+CREATE TABLE IF NOT EXISTS community_events (
+    id           TEXT PRIMARY KEY,
+    title        TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    place_name   TEXT NOT NULL DEFAULT '',
+    lon          REAL NOT NULL,
+    lat          REAL NOT NULL,
+    start_at     REAL,
+    duration_min INTEGER NOT NULL,
+    slots        INTEGER NOT NULL,
+    credits      INTEGER NOT NULL,
+    status       TEXT NOT NULL,
+    created_t    REAL NOT NULL DEFAULT 0,
+    ended_t      REAL
+);
+
+-- Neighbours offering to take a help request. The requester chooses one; the rest are
+-- declined. Status: offered, withdrawn, chosen, declined, no_show.
+CREATE TABLE IF NOT EXISTS offers (
+    task_id  TEXT NOT NULL,
+    resident TEXT NOT NULL,
+    status   TEXT NOT NULL,
+    t        REAL NOT NULL,
+    PRIMARY KEY (task_id, resident)
+);
+
+CREATE TABLE IF NOT EXISTS event_signups (
+    event_id     TEXT NOT NULL,
+    resident     TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    joined_t     REAL NOT NULL,
+    checked_in_t REAL,
+    PRIMARY KEY (event_id, resident)
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -116,7 +155,7 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
-JSON_FIELDS = {"skills", "availability", "valuation", "strengths", "weaknesses"}
+JSON_FIELDS = {"skills", "availability", "valuation", "strengths", "weaknesses", "pinged"}
 
 
 def _decode(row: sqlite3.Row | None) -> dict | None:
@@ -158,9 +197,13 @@ class Store:
         have = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
         if "when_label" not in have:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN when_label TEXT")
-        for column, decl in (("invitee", "TEXT"), ("start_at", "REAL")):
+        for column, decl in (("invitee", "TEXT"), ("start_at", "REAL"),
+                             ("pinged", "TEXT NOT NULL DEFAULT '[]'")):
             if column not in have:
                 self.conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {decl}")
+        have = {r["name"] for r in self.conn.execute("PRAGMA table_info(events)")}
+        if "public" not in have:
+            self.conn.execute("ALTER TABLE events ADD COLUMN public TEXT")
         have = {r["name"] for r in self.conn.execute("PRAGMA table_info(residents)")}
         for column, decl in (("occupation", "TEXT"),
                              ("strengths", "TEXT NOT NULL DEFAULT '[]'"),
@@ -180,7 +223,8 @@ class Store:
 
     def reset(self) -> None:
         with self.lock:
-            for table in ("ledger", "events", "tasks", "tenants", "residents", "meta"):
+            for table in ("ledger", "events", "offers", "event_signups", "community_events",
+                          "tasks", "tenants", "residents", "meta"):
                 self.conn.execute(f"DELETE FROM {table}")
             self.conn.execute("DELETE FROM sqlite_sequence")
 
@@ -265,6 +309,66 @@ class Store:
     def tenants(self) -> list[dict]:
         return [_decode(r) for r in self.execute("SELECT * FROM tenants ORDER BY id")]
 
+    # -- offers -----------------------------------------------------------
+
+    def offers(self, task_id: str) -> list[dict]:
+        return [dict(r) for r in self.execute(
+            "SELECT * FROM offers WHERE task_id = ? ORDER BY t, resident", (task_id,))]
+
+    def offers_by(self, resident: str) -> list[dict]:
+        return [dict(r) for r in self.execute(
+            "SELECT * FROM offers WHERE resident = ? ORDER BY t DESC", (resident,))]
+
+    def set_offer(self, task_id: str, resident: str, status: str, t: float) -> None:
+        self.execute("INSERT INTO offers (task_id, resident, status, t) VALUES (?, ?, ?, ?) "
+                     "ON CONFLICT(task_id, resident) DO UPDATE SET status = excluded.status, "
+                     "t = excluded.t", (task_id, resident, status, t))
+
+    # -- community events -------------------------------------------------
+
+    def add_community_event(self, **values) -> None:
+        self._insert("community_events", values)
+
+    def community_event(self, event_id: str) -> dict | None:
+        return _decode(self.execute("SELECT * FROM community_events WHERE id = ?",
+                                    (event_id,)).fetchone())
+
+    def community_events(self, statuses: Iterable[str] | None = None) -> list[dict]:
+        sql, params = "SELECT * FROM community_events", []
+        if statuses:
+            statuses = list(statuses)
+            sql += f" WHERE status IN ({', '.join('?' for _ in statuses)})"
+            params += statuses
+        sql += " ORDER BY start_at IS NULL, start_at, id"
+        return [_decode(r) for r in self.execute(sql, params)]
+
+    def update_community_event(self, event_id: str, **values) -> None:
+        self._update("community_events", event_id, values)
+
+    def next_event_id(self) -> str:
+        with self.lock:
+            n = int(self.get_meta("event_seq", "0")) + 1
+            self.set_meta("event_seq", str(n))
+            return f"E{n:03d}"
+
+    def signups(self, event_id: str) -> list[dict]:
+        return [dict(r) for r in self.execute(
+            "SELECT * FROM event_signups WHERE event_id = ? ORDER BY joined_t, resident",
+            (event_id,))]
+
+    def add_signup(self, event_id: str, resident: str, t: float) -> None:
+        self.execute("INSERT INTO event_signups (event_id, resident, status, joined_t) "
+                     "VALUES (?, ?, 'joined', ?)", (event_id, resident, t))
+
+    def remove_signup(self, event_id: str, resident: str) -> None:
+        self.execute("DELETE FROM event_signups WHERE event_id = ? AND resident = ?",
+                     (event_id, resident))
+
+    def update_signup(self, event_id: str, resident: str, **values) -> None:
+        assignments = ", ".join(f"{k} = ?" for k in values)
+        self.execute(f"UPDATE event_signups SET {assignments} WHERE event_id = ? AND resident = ?",
+                     [*values.values(), event_id, resident])
+
     # -- ledger -----------------------------------------------------------
 
     def post(self, t: float, kind: str, debit: str, credit: str, amount: int,
@@ -308,13 +412,21 @@ class Store:
     # -- events -----------------------------------------------------------
 
     def log(self, t: float, kind: str, text: str, task_id: str | None = None,
-            actor: str | None = None) -> None:
-        self.execute("INSERT INTO events (t, kind, text, task_id, actor) VALUES (?, ?, ?, ?, ?)",
-                     (t, kind, text, task_id, actor))
+            actor: str | None = None, public: str | None = None) -> None:
+        """Record what happened. ``text`` names names and is for SDP; ``public``, when given,
+        is the same news with nobody identified, for the residents' community feed."""
+        self.execute("INSERT INTO events (t, kind, text, task_id, actor, public) "
+                     "VALUES (?, ?, ?, ?, ?, ?)", (t, kind, text, task_id, actor, public))
 
     def events(self, limit: int = 40, after_id: int = 0) -> list[dict]:
         rows = self.execute("SELECT * FROM events WHERE id > ? ORDER BY id DESC LIMIT ?",
                             (after_id, limit))
+        return [dict(r) for r in rows]
+
+    def highlights(self, limit: int = 20) -> list[dict]:
+        """The anonymous community feed: only events that carry a public line."""
+        rows = self.execute("SELECT id, t, kind, public FROM events WHERE public IS NOT NULL "
+                            "ORDER BY id DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows]
 
 
