@@ -20,6 +20,7 @@ const spatial = {
   scenario: 'vertical',
   data: null,
   loading: false,
+  failed: null,       // why the scenarios couldn't be loaded, offered as "Try again"
   found: false,       // the user pressed Find; results and the cutaway are showing
   t0: 0,              // when Find was pressed, for the reveal animation
   asked: false,
@@ -43,17 +44,34 @@ async function spatialEnter() {
   // The demo needs the width of the map; the credits panel comes back on exit.
   spatial.rightWas = jiran.rightOpen;
   if (jiran.rightOpen) setRight(false);
-  if (!spatial.data && !spatial.loading) {
-    spatial.loading = true;
-    renderSpatial();
-    try {
-      spatial.data = await api('/api/demo/spatial');
-    } catch (err) {
-      toast(err.message, false);
-    } finally {
-      spatial.loading = false;
-    }
+  await spatialLoad();
+  spatialSelect(spatial.scenario);
+}
+
+/* The scenarios, fetched once. A request that hangs (the server was restarting, the
+ * network dropped) gives up after 20 s instead of leaving the panel loading for ever,
+ * and a failure says so with a way to try again. */
+async function spatialLoad() {
+  if (spatial.data || spatial.loading) return;
+  spatial.loading = true;
+  spatial.failed = null;
+  renderSpatial();
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 20000);
+  try {
+    const r = await fetch('/api/demo/spatial', {signal: abort.signal});
+    if (!r.ok) throw new Error(`the server answered ${r.status}`);
+    spatial.data = await r.json();
+  } catch (err) {
+    spatial.failed = err.name === 'AbortError' ? 'The server took too long to answer.' : `Couldn’t load the demo: ${err.message}.`;
+  } finally {
+    clearTimeout(timer);
+    spatial.loading = false;
   }
+}
+
+async function spatialRetry() {
+  await spatialLoad();
   spatialSelect(spatial.scenario);
 }
 
@@ -486,7 +504,10 @@ function renderSpatial() {
       ${choose('vertical', 'Vertical neighbour', 'Who is closest in 3D space?', 'layers')}
       ${choose('route', 'Practical route', 'Who can actually reach you fastest?', 'route')}
     </div>`;
-  if (spatial.loading || !s) {
+  if (spatial.failed && !spatial.loading) {
+    html += `<div class="empty-state">${icon('alert', 26)}<b>3D demo didn’t load</b><span>${esc(spatial.failed)}</span>
+      <button class="btn primary" id="sp-retry">${icon('swap', 15)}Try again</button></div>`;
+  } else if (spatial.loading || !s) {
     html += `<div class="skeleton"><i></i><i></i><i class="short"></i></div>`;
   } else if (s.id === 'vertical') {
     html += verticalPanel(s);
@@ -497,6 +518,7 @@ function renderSpatial() {
   for (const b of body.querySelectorAll('[data-sp]')) b.onclick = () => spatialSelect(b.dataset.sp);
   $('sp-find')?.addEventListener('click', spatialFind);
   $('sp-ask')?.addEventListener('click', spatialAsk);
+  $('sp-retry')?.addEventListener('click', spatialRetry);
 }
 
 function verticalPanel(s) {

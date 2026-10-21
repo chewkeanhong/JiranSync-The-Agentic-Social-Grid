@@ -50,6 +50,10 @@ FAMILIAR_BONUS = 0.06
 SHARED_EVENT_BONUS = 0.04
 # Homes this close are "around the corner".
 NEAR_M = 150.0
+# Walking pace, and how much longer than the straight line a walk must be to call out
+# the detour ("120 m away, but 9 min on foot").
+WALK_M_PER_MIN = 80.0
+DETOUR_RATIO = 2.2
 
 # Below this, nobody in reach can genuinely do the job and the commercial fallback offers
 # a verified tenant instead.
@@ -264,6 +268,11 @@ def rank(task: dict, residents: list[dict], *, network: RoadNetwork | None = Non
                 n = spatial["floors_apart"]
                 reasons.append("same building · " + ("same floor" if n == 0 else
                                f"{n} floor{'s' if n > 1 else ''} away"))
+            elif straight < 400 and walk >= 4 and walk * WALK_M_PER_MIN > straight * DETOUR_RATIO:
+                # Close as the crow flies, far on foot: a drain, a fence or a dead end
+                # between you. The map would mislead; the street graph doesn't.
+                reasons.append(f"{max(10, round(straight / 10) * 10)} m away, but "
+                               f"{round(walk)} min on foot — no direct path")
             else:
                 reasons.append(f"{max(1, round(walk))} min walk")
 

@@ -76,6 +76,18 @@ help is not first-come. It runs in four steps:
    the job; the other offers close politely.
 
 The job then runs as before: GPS arrival, the requester confirms, credits are released.
+
+**The 3D Demo's intelligence, privacy-safe.** The spatial view (who lives where, on which
+floor) is SDP's alone. Residents get its results as words and times instead of a map of
+people's homes:
+
+- **Route-aware distance in the choose list.** When the street graph says a neighbour is
+  much further on foot than they look, the offer says so: *"270 m away, but 12 min on
+  foot, no direct path"*.
+- **A live arrival time once you've chosen.** Only your helper's route is drawn, with
+  *"Rajesh arrives in ~4 min · 320 m"* counting down.
+- **View my home in 3D** (your own card, from the *Find me* button). The camera comes down
+  to your house and slowly circles it. Only your home is marked.
 A no-show refunds the credits and reopens the other offers. A request nobody was chosen for
 expires an hour after its time, and nothing was ever charged.
 

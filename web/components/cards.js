@@ -42,6 +42,17 @@ function stepper(t) {
   }).join('')}</ol>`;
 }
 
+/** How far the helper still has to go on their real route, and when they'll get there.
+ *  Simulated minutes, the same clock as the rest of the township. */
+function arrival(t) {
+  const m = (state?.movers || []).find((x) => x.task_id === t.id && !x.done && x.route?.length > 1);
+  if (!m) return null;
+  let metres = 0;
+  for (let i = 1; i < m.route.length; i++) metres += distanceM(m.route[i - 1], m.route[i]);
+  const speed = m.mode === 'drive' ? 8.5 : 1.35;      // mirrors jiransync.grid DRIVE_MPS / WALK_MPS
+  return {m: metres, min: Math.max(1, Math.ceil(metres / speed / 60)), toYou: m.leg !== 'ride'};
+}
+
 /* What connects a neighbour to you, as small tags: a past favour (gold), a new face
  * (green), an SDP event or a street you share (blue). */
 function tieTags(ties) {
@@ -173,7 +184,13 @@ function taskCard(id) {
         avatarStack(cands.map((c) => c.resident_id), 24));
     }
   } else if (t.status === 'in_progress' && t.provider) {
-    insight = aiInsight(`<b>${helping ? 'You’re' : `${esc(firstName(t.provider))} is`} on the way.</b> ${credits(t.credits)} held safely in escrow until it’s done.`);
+    const eta = (mine || helping) ? arrival(t) : null;
+    const who = helping ? 'You’re' : `${esc(firstName(t.provider))} is`;
+    insight = aiInsight(eta
+      ? (eta.toYou
+        ? `<b>${helping ? `You reach ${esc(firstName(t.requester))}` : `${esc(firstName(t.provider))} arrives`} in ~${eta.min} min</b> · ${fmtDist(eta.m)} on the road, following the street map. ${credits(t.credits)} held in escrow until it’s done.`
+        : `<b>On the way to ${esc(t.dest_name || 'the station')} · ~${eta.min} min</b> · ${fmtDist(eta.m)} to go.`)
+      : `<b>${who} on the way.</b> ${credits(t.credits)} held safely in escrow until it’s done.`);
   } else if (t.status === 'arrived') {
     insight = aiInsight(`<b>${helping ? 'You’ve' : `${esc(firstName(t.provider))} has`} arrived</b> — confirmed by GPS.`);
   } else if (t.status === 'completed') {
@@ -340,6 +357,10 @@ function residentCard(id) {
   if (s.task) {
     buttons.push(`<button class="btn" data-act="task">${icon('list', 16)}View task</button>`);
     actions.task = () => openTask(s.task.id, true);
+  }
+  if (you && !jiran.admin) {
+    buttons.unshift(`<button class="btn primary" data-act="home3d">${icon('home', 16)}View my home in 3D</button>`);
+    actions.home3d = () => viewMyHome();
   }
   const doingIcon = s.status === 'moving' ? (s.mode === 'drive' ? 'car' : 'walk')
     : s.status === 'busy' ? 'wrench' : s.status === 'available' ? 'check' : 'clock';

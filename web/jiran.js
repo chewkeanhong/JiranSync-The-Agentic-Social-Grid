@@ -978,6 +978,41 @@ function focusOn(points, {maxZoom = 17.2, minZoom = 14.6, bearing = -24, pitch =
 }
 
 /* A first view of the neighbourhood around you: people, requests, a shop. */
+/* Your home in 3D: the camera comes down to your roof and slowly circles it. Only your
+ * house is marked; every other home stays an unlabelled building. */
+function viewMyHome() {
+  const home = myHome();
+  if (!home || !deckgl) return;
+  closeInspector();
+  const b = world.buildingById[home.home_building];
+  const v = currentView[viewMode] || {};
+  const start = (v.bearing ?? -20);
+  // The camera looks at sea level; the house stands on ground tens of metres up, which a
+  // tilted view pushes up the screen. Aim past it by that much, and to the middle of the
+  // map the panels leave open, so the house sits in the centre all the way round.
+  const aim = (zoom, pitch, bearing) => {
+    const W = window.innerWidth;
+    const left = $('left')?.getBoundingClientRect().right || 0;
+    const rightEl = $('right');
+    const right = rightEl && !rightEl.classList.contains('closed') ? W - rightEl.getBoundingClientRect().left : 0;
+    const cosLat = Math.cos(home.lat * Math.PI / 180);
+    const mpp = 156543.03 * cosLat / Math.pow(2, zoom);
+    const ahead = (groundAt(home.lon, home.lat) + 4) * Math.tan(pitch * Math.PI / 180);
+    const across = -(left - right) / 2 * mpp;
+    const br = bearing * Math.PI / 180;
+    const east = Math.sin(br) * ahead + Math.cos(br) * across;
+    const north = Math.cos(br) * ahead - Math.sin(br) * across;
+    const M = 6371000.0 * Math.PI / 180.0;
+    return {longitude: home.lon + east / (M * cosLat), latitude: home.lat + north / M, zoom, pitch, bearing};
+  };
+  setCamera(aim(18.6, 62, start), 1800);
+  clearTimeout(viewMyHome.timer);
+  // Then one slow half-turn round it, so its shape and the street around it read in 3D.
+  viewMyHome.timer = setTimeout(() => setCamera(aim(18.9, 64, start + 150), 9000), 1850);
+  const floors = b?.properties?.floors || Math.max(1, Math.round((b?.properties?.height || 6) / 3.2));
+  toast(`Your home · ${home.unit || ''} · ${floors} storey${floors === 1 ? '' : 's'} · only you can see it marked`);
+}
+
 function frameNeighbourhood() {
   const home = myHome();
   if (!home) return;
